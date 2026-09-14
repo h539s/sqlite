@@ -3093,20 +3093,16 @@ void sqlite3EndTable(
     ** inside it.  Only useful while reparsing a stored statement, so it is
     ** not worth a field in the Table object. */
     if( IN_RENAME_OBJECT ){
-      pParse->zTabOpt = &pEnd->z[pEnd->n];
+      pParse->sColListEnd = *pEnd;
     }
 
     if( pCons->z==0 ){
       pCons = pEnd;
     }
     p->u.tab.addColOffset = 13 + (int)(pCons->z - pParse->sNameToken.z);
-
     /* Where a new table-constraint is spliced in: the ")" that closes the
     ** column and constraint list.  A CREATE TABLE ... AS SELECT has no such
     ** token and leaves this 0. */
-    if( IN_RENAME_OBJECT ){
-      pParse->zConsIns = pEnd->z;
-    }
   }
 #endif
 }
