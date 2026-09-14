@@ -9,12 +9,13 @@
 #
 #*************************************************************************
 #
-# Tests for ALTER TABLE <table> SET STRICT = ON.
+# Tests for ALTER TABLE <table> SET STRICT = ON and = OFF.
 #
-# The command appends the STRICT table-option to the stored CREATE TABLE
-# statement, reloads the schema, and then uses PRAGMA quick_check to
-# confirm that the rows already in the table satisfy the stricter
-# definition.  No row data is rewritten.
+# ON appends the STRICT table-option to the stored CREATE TABLE statement.
+# OFF regenerates the whole table-option list without it, so it does not
+# matter how that list was written.  Either way the schema is reloaded and
+# PRAGMA quick_check is run against the new definition to confirm the rows
+# already in the table satisfy it.  No row data is rewritten.
 #
 
 set testdir [file dirname $argv0]
@@ -28,7 +29,9 @@ ifcapable !altertable {
 }
 
 #-------------------------------------------------------------------------
-# Conversions that must succeed, and the schema text they produce.
+# Turning STRICT on.  Each case: the CREATE TABLE statement, rows to
+# preload, the table name as written and bare, and the schema text the
+# conversion produces.
 #
 foreach {tn create rows tbl nm after} {
  1   {CREATE TABLE t1(a INT)}
@@ -93,22 +96,91 @@ foreach {tn create rows tbl nm after} {
      {CREATE TABLE t1(a INT, b TEXT) STRICT}
 } {
   reset_db
-
   do_execsql_test 1.$tn.0 $create
   if {$rows ne ""} { do_execsql_test 1.$tn.1 $rows }
-
   do_execsql_test 1.$tn.2 "ALTER TABLE $tbl SET STRICT = ON" {}
-
   do_execsql_test 1.$tn.3 {
     SELECT sql FROM sqlite_schema WHERE type='table' AND sql IS NOT NULL
   } [list $after]
-
-  # The table must now behave as a STRICT table.
   do_execsql_test 1.$tn.4 {
     SELECT count(*) FROM pragma_table_list WHERE name=$nm AND strict=1
   } {1}
-
   do_execsql_test 1.$tn.5 { PRAGMA integrity_check } {ok}
+}
+
+#-------------------------------------------------------------------------
+# Turning STRICT off.  The option list is rebuilt, so its original spelling,
+# the order of the options within it, and any comment inside it are all
+# irrelevant to the result.
+#
+foreach {tn create rows tbl nm after} {
+ 1   {CREATE TABLE t1(a INT) STRICT}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT)}
+ 2   {CREATE TABLE t1(a INT, b TEXT, c REAL, d BLOB) STRICT}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT, b TEXT, c REAL, d BLOB)}
+ 3   {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID, STRICT}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID}
+ 4   {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) STRICT, WITHOUT ROWID}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID}
+ 5   {CREATE TABLE t1(a INT)STRICT}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT)}
+ 6   {CREATE TABLE t1(a INT)   strict}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT)}
+ 7   {CREATE TABLE t1(a INT) /*c1*/ STRICT}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT)}
+ 8   {CREATE TABLE t1(a ANY) STRICT}
+     {INSERT INTO t1 VALUES('abc'),(7),(x'ff');}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a ANY)}
+ 9   {CREATE TABLE t1(a INT, b TEXT) STRICT}
+     {INSERT INTO t1 VALUES(1,'x'),(2,'y');}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT, b TEXT)}
+ 10  {CREATE TABLE t1(a TEXT, b INT, PRIMARY KEY(a)) STRICT}
+     {INSERT INTO t1 VALUES('k',1);}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a TEXT, b INT, PRIMARY KEY(a))}
+ 11  {CREATE TABLE "a b"(x INT) STRICT}
+     {}
+     {"a b"}
+     {a b}
+     {CREATE TABLE "a b"(x INT)}
+} {
+  reset_db
+  do_execsql_test 2.$tn.0 $create
+  if {$rows ne ""} { do_execsql_test 2.$tn.1 $rows }
+  do_execsql_test 2.$tn.2 "ALTER TABLE $tbl SET STRICT = OFF" {}
+  do_execsql_test 2.$tn.3 {
+    SELECT sql FROM sqlite_schema WHERE type='table' AND sql IS NOT NULL
+  } [list $after]
+  do_execsql_test 2.$tn.4 {
+    SELECT count(*) FROM pragma_table_list WHERE name=$nm AND strict=0
+  } {1}
+  do_execsql_test 2.$tn.5 { PRAGMA integrity_check } {ok}
 }
 
 #-------------------------------------------------------------------------
@@ -127,64 +199,150 @@ foreach {tn setup stmt err} {
  4   {CREATE TABLE t1(a TEXT, b INT, PRIMARY KEY(a)); INSERT INTO t1 VALUES(NULL,1);}
      {ALTER TABLE t1 SET STRICT = ON}
      {cannot set STRICT on t1: NULL value in t1.a}
- 5   {CREATE TABLE t1(a INT);}
+ 5   {CREATE TABLE t1(a ANY) STRICT; INSERT INTO t1 VALUES('123');}
+     {ALTER TABLE t1 SET STRICT = OFF}
+     {cannot unset STRICT on t1: TEXT value in t1.a}
+ 6   {CREATE TABLE t1(a INT);}
      {ALTER TABLE t1 SET FOO = ON}
      {unknown table option: FOO}
- 6   {CREATE TABLE t1(a INT); CREATE VIEW v1 AS SELECT * FROM t1;}
+ 7   {CREATE TABLE t1(a INT) STRICT;}
+     {ALTER TABLE t1 SET FOO = OFF}
+     {unknown table option: FOO}
+ 8   {CREATE TABLE t1(a INT);}
+     {ALTER TABLE t1 SET STRICT = MAYBE}
+     {expected ON or OFF, got: MAYBE}
+ 9   {CREATE TABLE t1(a INT); CREATE VIEW v1 AS SELECT * FROM t1;}
      {ALTER TABLE v1 SET STRICT = ON}
      {cannot set table options on view "v1"}
- 7   {}
+ 10  {CREATE TABLE t1(a INT); CREATE VIEW v1 AS SELECT * FROM t1;}
+     {ALTER TABLE v1 SET STRICT = OFF}
+     {cannot set table options on view "v1"}
+ 11  {}
      {ALTER TABLE nosuch SET STRICT = ON}
      {no such table: nosuch}
- 8   {CREATE TABLE t1(a INTEGER PRIMARY KEY AUTOINCREMENT);}
+ 12  {}
+     {ALTER TABLE nosuch SET STRICT = OFF}
+     {no such table: nosuch}
+ 13  {CREATE TABLE t1(a INTEGER PRIMARY KEY AUTOINCREMENT);}
      {ALTER TABLE sqlite_sequence SET STRICT = ON}
      {table sqlite_sequence may not be altered}
 } {
   reset_db
-  if {$setup ne ""} { do_execsql_test 2.$tn.0 $setup }
-  do_catchsql_test 2.$tn.1 $stmt [list 1 $err]
+  if {$setup ne ""} { do_execsql_test 3.$tn.0 $setup }
+  do_catchsql_test 3.$tn.1 $stmt [list 1 $err]
 }
 
 #-------------------------------------------------------------------------
 # A refused conversion leaves the schema and the rows exactly as they were.
 #
 reset_db
-do_execsql_test 3.0 {
+do_execsql_test 4.0 {
   CREATE TABLE t1(a INT, b TEXT);
   INSERT INTO t1 VALUES('abc', 'x');
 }
-do_catchsql_test 3.1 {
+do_catchsql_test 4.1 {
   ALTER TABLE t1 SET STRICT = ON;
 } {1 {cannot set STRICT on t1: non-INT value in t1.a}}
-do_execsql_test 3.2 {
+do_execsql_test 4.2 {
   SELECT sql FROM sqlite_schema WHERE name='t1'
 } {{CREATE TABLE t1(a INT, b TEXT)}}
-do_execsql_test 3.3 {
+do_execsql_test 4.3 {
   SELECT typeof(a), a FROM t1
 } {text abc}
 
 #-------------------------------------------------------------------------
-# Turning STRICT on when it is already on is a no-op, not an error.
+# Turning STRICT off is refused when it would leave a row the looser
+# definition rejects.  An ANY column has BLOB affinity while the table is
+# strict and NUMERIC affinity once it is not, so text that converts
+# losslessly to a number becomes an inconsistency.
 #
 reset_db
-do_execsql_test 4.0 {
+do_execsql_test 5.0 {
+  CREATE TABLE t1(a ANY) STRICT;
+  INSERT INTO t1 VALUES('123');
+  SELECT typeof(a) FROM t1;
+} {text}
+do_catchsql_test 5.1 {
+  ALTER TABLE t1 SET STRICT = OFF;
+} {1 {cannot unset STRICT on t1: TEXT value in t1.a}}
+do_execsql_test 5.2 {
+  SELECT sql FROM sqlite_schema WHERE name='t1'
+} {{CREATE TABLE t1(a ANY) STRICT}}
+do_execsql_test 5.3 { PRAGMA integrity_check } {ok}
+
+# Text that is not convertible is fine.
+reset_db
+do_execsql_test 5.4 {
+  CREATE TABLE t1(a ANY) STRICT;
+  INSERT INTO t1 VALUES('abc');
+  ALTER TABLE t1 SET STRICT = OFF;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a ANY)}}
+do_execsql_test 5.5 { PRAGMA integrity_check } {ok}
+
+#-------------------------------------------------------------------------
+# Round trip.  ON then OFF gives back the statement the table started with.
+#
+reset_db
+do_execsql_test 6.0 {
+  CREATE TABLE t1(a INT, b TEXT);
+  ALTER TABLE t1 SET STRICT = ON;
+  ALTER TABLE t1 SET STRICT = OFF;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT, b TEXT)}}
+
+do_execsql_test 6.1 {
+  CREATE TABLE t2(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID;
+  ALTER TABLE t2 SET STRICT = ON;
+  ALTER TABLE t2 SET STRICT = OFF;
+  SELECT sql FROM sqlite_schema WHERE name='t2';
+} {{CREATE TABLE t2(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID}}
+
+#-------------------------------------------------------------------------
+# Setting the option to what it already is changes nothing, either way.
+#
+reset_db
+do_execsql_test 7.0 {
   CREATE TABLE t1(a INT) STRICT;
   ALTER TABLE t1 SET STRICT = ON;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT) STRICT}}
 
+do_execsql_test 7.1 {
+  CREATE TABLE t2(a INT);
+  ALTER TABLE t2 SET STRICT = OFF;
+  SELECT sql FROM sqlite_schema WHERE name='t2';
+} {{CREATE TABLE t2(a INT)}}
+
 #-------------------------------------------------------------------------
-# There is no OFF form.  STRICT cannot be turned back off this way.
+# ON and OFF may be quoted.  Anything else is an error.
 #
-do_catchsql_test 5.0 {
-  ALTER TABLE t1 SET STRICT = OFF;
-} {1 {near "OFF": syntax error}}
+reset_db
+do_execsql_test 8.0 {
+  CREATE TABLE t1(a INT);
+  ALTER TABLE t1 SET STRICT = "on";
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT) STRICT}}
+
+do_execsql_test 8.1 {
+  ALTER TABLE t1 SET STRICT = 'off';
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT)}}
+
+do_catchsql_test 8.2 {
+  ALTER TABLE t1 SET STRICT = TRUE;
+} {1 {expected ON or OFF, got: TRUE}}
+
+# The complaint about the value is not replaced by one about the table.
+do_catchsql_test 8.3 {
+  ALTER TABLE nosuch SET STRICT = TRUE;
+} {1 {expected ON or OFF, got: TRUE}}
 
 #-------------------------------------------------------------------------
 # The edit lands on the table row only; dependent objects are untouched.
 #
 reset_db
-do_execsql_test 6.0 {
+do_execsql_test 9.0 {
   CREATE TABLE t1(a INT, b TEXT);
   CREATE INDEX i1 ON t1(a);
   CREATE VIEW v1 AS SELECT a FROM t1;
@@ -193,25 +351,30 @@ do_execsql_test 6.0 {
   SELECT name, sql FROM sqlite_schema ORDER BY name;
 } {i1 {CREATE INDEX i1 ON t1(a)} r1 {CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END} t1 {CREATE TABLE t1(a INT, b TEXT) STRICT} v1 {CREATE VIEW v1 AS SELECT a FROM t1}}
 
+do_execsql_test 9.1 {
+  ALTER TABLE t1 SET STRICT = OFF;
+  SELECT name, sql FROM sqlite_schema ORDER BY name;
+} {i1 {CREATE INDEX i1 ON t1(a)} r1 {CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END} t1 {CREATE TABLE t1(a INT, b TEXT)} v1 {CREATE VIEW v1 AS SELECT a FROM t1}}
+
 #-------------------------------------------------------------------------
 # A trailing line comment in the stored statement must not swallow the new
 # option.
 #
 reset_db
-do_execsql_test 7.0 {
+do_execsql_test 10.0 {
   CREATE TABLE t1(a INT) -- trailing
   ;
 }
-do_execsql_test 7.1 {
+do_execsql_test 10.1 {
   ALTER TABLE t1 SET STRICT = ON;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT) STRICT}}
 
 #-------------------------------------------------------------------------
-# The conversion participates in the surrounding transaction.
+# Both directions participate in the surrounding transaction.
 #
 reset_db
-do_execsql_test 8.0 {
+do_execsql_test 11.0 {
   CREATE TABLE t1(a INT);
   BEGIN;
   ALTER TABLE t1 SET STRICT = ON;
@@ -219,11 +382,28 @@ do_execsql_test 8.0 {
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT)}}
 
-do_execsql_test 8.1 {
+do_execsql_test 11.1 {
   BEGIN;
   ALTER TABLE t1 SET STRICT = ON;
   COMMIT;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT) STRICT}}
+
+do_execsql_test 11.2 {
+  BEGIN;
+  ALTER TABLE t1 SET STRICT = OFF;
+  ROLLBACK;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT) STRICT}}
+
+#-------------------------------------------------------------------------
+# The temp schema works the same way.
+#
+reset_db
+do_execsql_test 12.0 {
+  CREATE TEMP TABLE t1(a INT) STRICT;
+  ALTER TABLE t1 SET STRICT = OFF;
+  SELECT sql FROM sqlite_temp_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT)}}
 
 finish_test
