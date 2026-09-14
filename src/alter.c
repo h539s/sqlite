@@ -3114,11 +3114,11 @@ static void insertConstraintFunc(
   }
 
   if( iCol<0 ){
-    if( sParse.zConsIns==0 ){
+    if( sParse.sColListEnd.z==0 ){
       rc = SQLITE_CORRUPT_BKPT;
       goto insert_cons_cleanup;
     }
-    iOff = (int)(sParse.zConsIns - zSql);
+    iOff = (int)(sParse.sColListEnd.z - zSql);
     zNew = sqlite3MPrintf(db, "%.*s, %s%s", iOff, zSql, zCons, &zSql[iOff]);
   }else{
     ParseLoc *p;
@@ -4150,13 +4150,13 @@ static void unsetStrictFunc(
   rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
   if( rc!=SQLITE_OK ) goto unset_strict_cleanup;
   pTab = sParse.pNewTable;
-  if( pTab==0 || !IsOrdinaryTable(pTab) || sParse.zTabOpt==0 ){
+  if( pTab==0 || !IsOrdinaryTable(pTab) || sParse.sColListEnd.z==0 ){
     /* This can happen if the sqlite_schema table is corrupt */
     rc = SQLITE_CORRUPT_BKPT;
     goto unset_strict_cleanup;
   }
 
-  nKeep = (int)(sParse.zTabOpt - zSql);
+  nKeep = (int)(&sParse.sColListEnd.z[sParse.sColListEnd.n] - zSql);
   assert( nKeep>0 && nKeep<=sqlite3Strlen30(zSql) );
   zNew = sqlite3MPrintf(db, "%.*s%s", nKeep, zSql,
       (pTab->tabFlags & TF_WithoutRowid)!=0 ? " WITHOUT ROWID" : ""
@@ -4368,9 +4368,9 @@ static char *alterRewriteCreate(
   int rc;
 
   rc = renameParseSql(&sParse, db->aDb[iDb].zDbSName, db, zSql, iDb==1);
-  if( rc==SQLITE_OK && sParse.pNewTable!=0 && sParse.zTabOpt!=0 ){
+  if( rc==SQLITE_OK && sParse.pNewTable!=0 && sParse.sColListEnd.z!=0 ){
     RenameToken *pName = renameTokenFind(&sParse, 0, sParse.pNewTable->zName);
-    int nKeep = (int)(sParse.zTabOpt - zSql);
+    int nKeep = (int)(&sParse.sColListEnd.z[sParse.sColListEnd.n] - zSql);
     const char *zWr = (tabFlags & TF_WithoutRowid) ? " WITHOUT ROWID" : "";
     const char *zSep = ((tabFlags & TF_WithoutRowid)
                      && (tabFlags & TF_Strict)) ? "," : "";
