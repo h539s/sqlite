@@ -758,13 +758,26 @@ struct RenameToken {
 **                      there becomes a constraint on that column.  Exactly
 **                      one entry per column.
 **
+**   PARSELOC_PrimaryKey
+**                      The extent of a PRIMARY KEY clause, taken in by
+**                      ALTER TABLE ... DROP CONSTRAINT PRIMARY KEY.  A
+**                      table has at most one, written either on a column
+**                      or on the table, so iCol is -1 for both forms and
+**                      the clause is found by kind.
+**
+**   PARSELOC_Default   The extent of a DEFAULT clause, taken in by
+**                      ALTER TABLE ... DROP CONSTRAINT DEFAULT.  A column
+**                      can carry more than one - SQLite lets the last win
+**                      - so there can be several entries with the same
+**                      iCol.
+**
 ** Objects are only created while IN_RENAME_OBJECT, which means only during
 ** the reparse of a stored schema statement performed by renameParseSql().
 ** The extent t therefore always points into the same string that the
 ** caller is about to edit.
 **
-** Created by sqlite3ParseLocAdd() and consumed by dropNotNullFunc() and
-** insertConstraintFunc(), all further down in this file.
+** Created by sqlite3ParseLocAdd() and consumed by dropColConsFunc(),
+** dropPkFunc() and insertConstraintFunc(), all further down in this file.
 */
 struct ParseLoc {
   u8 eType;              /* One of the PARSELOC_* values */
@@ -2521,7 +2534,7 @@ static int notNullRtrim(const char *zStart, const char *zEnd){
 */
 void sqlite3ConsLocAdd(
   Parse *pParse,        /* Parsing context */
-  u8 eType,             /* PARSELOC_NotNull or PARSELOC_PrimaryKey */
+  u8 eType,             /* PARSELOC_NotNull, _PrimaryKey or _Default */
   int iCol,             /* Column being constrained, or -1 */
   const char *zStart,   /* First byte of the constraint keyword */
   const char *zEnd      /* First byte past that keyword */
@@ -2580,6 +2593,26 @@ void sqlite3ColDefLocExtend(Parse *pParse){
   zLimit = pParse->sLastToken.z;
   if( zLimit==0 || zLimit<=pLoc->t.z ) return;
   pLoc->t.n = (unsigned)notNullRtrim(pLoc->t.z, zLimit);
+}
+
+/*
+** Record where a column's DEFAULT clause sits, so that ALTER TABLE ...
+** DROP CONSTRAINT DEFAULT can cut it out without looking for it.
+**
+** pKw is the DEFAULT keyword.  sqlite3ConsLocAdd() takes in everything that
+** follows it up to the end of the last real token - the value, however it
+** was written - and an immediately preceding "CONSTRAINT <name>".
+**
+** The clause belongs to the column being defined, which is the last one
+** added so far.  The five grammar rules for DEFAULT all reduce while that
+** is still true.
+*/
+void sqlite3DefaultLocAdd(Parse *pParse, Token *pKw){
+  Table *p = pParse->pNewTable;
+  assert( IN_RENAME_OBJECT );
+  if( p==0 || p->nCol<=0 ) return;
+  sqlite3ConsLocAdd(pParse, PARSELOC_Default, p->nCol-1,
+                    pKw->z, &pKw->z[pKw->n]);
 }
 
 /*
@@ -2881,6 +2914,7 @@ static void dropConstraintFunc(
   }
 }
 
+
 /*
 ** Find the column named zCol in pTab, which is a table as just reparsed out
 ** of the text held in sqlite_schema.  Returns the column index, or -1.
@@ -2903,30 +2937,31 @@ static int alterColumnIndex(Table *pTab, const char *zCol){
 }
 
 /*
-** Internal SQL function:
+** Shared implementation of the internal SQL functions
 **
 **     sqlite_drop_notnull(ISCHEMA, SQL, COLNAME)
+**     sqlite_drop_default(ISCHEMA, SQL, COLNAME)
 **
 ** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
-** copy of that statement with every NOT NULL constraint on the column
+** copy of that statement with every constraint of kind eType on the column
 ** named COLNAME removed.  The name is resolved against SQL itself - see
-** alterColumnIndex().  If the column has no NOT
-** NULL constraint the statement is returned unchanged, which follows
-** postgres and matches what the INTEGER form of sqlite_drop_constraint()
-** does.
+** alterColumnIndex().  If the column carries no such constraint the
+** statement is returned unchanged, which follows postgres and matches what
+** the INTEGER form of sqlite_drop_constraint() does.
 **
 ** This is the "technique C" counterpart of sqlite_drop_constraint().
 ** Instead of scanning the text for the constraint, it reparses the
-** statement and reads the extents that sqlite3NotNullLocAdd() recorded
-** during that parse.  Because the parser - not a heuristic scan - decides
-** which column each constraint belongs to, a column carrying more than one
-** NOT NULL clause has all of them removed.  The scanning implementation
-** removes only the first, silently leaving the column NOT NULL.
+** statement and reads the extents that sqlite3ConsLocAdd() recorded during
+** that parse.  Because the parser - not a heuristic scan - decides which
+** column each constraint belongs to, a column carrying more than one such
+** clause has all of them removed.  SQLite accepts both "a NOT NULL NOT
+** NULL" and "a DEFAULT 1 DEFAULT 2"; the scanning implementation removes
+** only the first, silently leaving the rest in force.
 */
-static void dropNotNullFunc(
+static void dropColConsFunc(
   sqlite3_context *ctx,
-  int NotUsed,
-  sqlite3_value **argv
+  sqlite3_value **argv,
+  u8 eType                        /* PARSELOC_NotNull or PARSELOC_Default */
 ){
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   int iSchema = sqlite3_value_int(argv[0]);
@@ -2944,7 +2979,6 @@ static void dropNotNullFunc(
   db->xAuth = 0;
 #endif
 
-  UNUSED_PARAMETER(NotUsed);
   if( zSql==0 || zCol==0 || iSchema<0 || iSchema>=db->nDb ){
     rc = SQLITE_OK;
     goto drop_notnull_done;
@@ -2993,7 +3027,7 @@ static void dropNotNullFunc(
     int t = 0;
 
     for(p=sParse.pLoc; p; p=p->pNext){
-      if( p->eType!=PARSELOC_NotNull || p->iCol!=iCol ) continue;
+      if( p->eType!=eType || p->iCol!=iCol ) continue;
       if( pBest==0 || p->t.z>pBest->t.z ) pBest = p;
     }
     if( pBest==0 ) break;
@@ -3007,7 +3041,8 @@ static void dropNotNullFunc(
     ** the whitespace that precedes it.  If what comes next closes the
     ** column definition, the two neighbours can simply abut: "a INT NOT
     ** NULL, b" becomes "a INT, b" and not "a INT , b".  Otherwise exactly
-    ** one space is left behind to keep them apart.
+    ** one space is left behind to keep them apart.  The same applies to
+    ** "a INT DEFAULT 5, b".
     **
     ** Comments in front of the constraint are deliberately left alone.
     ** They belong to the column, not to the constraint being dropped. */
@@ -3037,6 +3072,30 @@ drop_notnull_done:
   if( rc!=SQLITE_OK ){
     sqlite3_result_error_code(ctx, rc);
   }
+}
+
+/*
+** Internal SQL function sqlite_drop_notnull(ISCHEMA, SQL, COLNAME).
+*/
+static void dropNotNullFunc(
+  sqlite3_context *ctx,
+  int NotUsed,
+  sqlite3_value **argv
+){
+  UNUSED_PARAMETER(NotUsed);
+  dropColConsFunc(ctx, argv, PARSELOC_NotNull);
+}
+
+/*
+** Internal SQL function sqlite_drop_default(ISCHEMA, SQL, COLNAME).
+*/
+static void dropDefaultFunc(
+  sqlite3_context *ctx,
+  int NotUsed,
+  sqlite3_value **argv
+){
+  UNUSED_PARAMETER(NotUsed);
+  dropColConsFunc(ctx, argv, PARSELOC_Default);
 }
 
 /*
@@ -4851,6 +4910,7 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_rename_quotefix,2, renameQuotefixFunc),
     INTERNAL_FUNCTION(sqlite_drop_constraint,2, dropConstraintFunc),
     INTERNAL_FUNCTION(sqlite_drop_notnull,   3, dropNotNullFunc),
+    INTERNAL_FUNCTION(sqlite_drop_default,   3, dropDefaultFunc),
     INTERNAL_FUNCTION(sqlite_drop_pk,        2, dropPkFunc),
     INTERNAL_FUNCTION(sqlite_fail,           2, failConstraintFunc),
     INTERNAL_FUNCTION(sqlite_insert_constraint,4,insertConstraintFunc),
