@@ -1388,10 +1388,10 @@ typedef struct Lookaside Lookaside;
 typedef struct LookasideSlot LookasideSlot;
 typedef struct Module Module;
 typedef struct NameContext NameContext;
-typedef struct NotNullLoc NotNullLoc;
 typedef struct OnOrUsing OnOrUsing;
 typedef struct Parse Parse;
 typedef struct ParseCleanup ParseCleanup;
+typedef struct ParseLoc ParseLoc;
 typedef struct PreUpdate PreUpdate;
 typedef struct PrintfArguments PrintfArguments;
 typedef struct RCStr RCStr;
@@ -4048,8 +4048,11 @@ struct Parse {
   With *pWith;              /* Current WITH clause, or NULL */
 #ifndef SQLITE_OMIT_ALTERTABLE
   RenameToken *pRename;     /* Tokens subject to renaming by ALTER TABLE */
-  NotNullLoc *pNotNull;     /* Text extent of each NOT NULL clause seen.  Only
-                            ** collected when IN_RENAME_OBJECT. */
+  ParseLoc *pLoc;           /* Positions recorded from the text being parsed.
+                            ** Only collected when IN_RENAME_OBJECT. */
+  const char *zConsIns;     /* Where a new table-constraint is spliced in: the
+                            ** ")" closing the column list.  IN_RENAME_OBJECT
+                            ** only, and 0 for a CREATE TABLE ... AS SELECT. */
 #endif
 };
 
@@ -5603,7 +5606,12 @@ void sqlite3AlterFinishAddColumn(Parse *, Token *);
 void sqlite3AlterBeginAddColumn(Parse *, SrcList *);
 void sqlite3AlterDropColumn(Parse*, SrcList*, const Token*);
 void sqlite3NotNullLocAdd(Parse*, int, const char*, const char*);
-void sqlite3NotNullLocFree(sqlite3*, NotNullLoc*);
+void sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
+void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
+/* Allowed values for the second argument to sqlite3ParseLocAdd().  See the
+** comment on struct ParseLoc in alter.c for what each one records. */
+#define PARSELOC_NotNull  1
+#define PARSELOC_ColDef   2
 const void *sqlite3RenameTokenMap(Parse*, const void*, const Token*);
 void sqlite3RenameTokenRemap(Parse*, const void *pTo, const void *pFrom);
 void sqlite3RenameExprUnmap(Parse*, Expr*);
