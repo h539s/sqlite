@@ -1,0 +1,374 @@
+# 2026 September 12
+#
+# The author disclaims copyright to this source code.  In place of
+# a legal notice, here is a blessing:
+#
+#    May you do good and not evil.
+#    May you find forgiveness for yourself and forgive others.
+#    May you share freely, never taking more than you give.
+#
+#*************************************************************************
+#
+# Tests for ALTER TABLE <table> SET WITHOUT_ROWID = ON and = OFF.
+#
+# Unlike SET STRICT this is not a schema-text edit: a rowid table and a
+# WITHOUT ROWID table have different b-trees, so the table is built anew
+# and the rows are copied across.  The work is split into three pieces --
+# build the replacement, drop the original, rename the replacement into
+# place and replay the indexes and triggers -- so most of what is checked
+# here is that nothing is lost in between.
+#
+
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+set testprefix alterwithoutrowid
+
+# If SQLITE_OMIT_ALTERTABLE is defined, omit this file.
+ifcapable !altertable {
+  finish_test
+  return
+}
+
+#-------------------------------------------------------------------------
+# Turning WITHOUT ROWID on.  Each case: the CREATE TABLE statement, rows to
+# preload, the table name as written and bare, and the schema text the
+# conversion produces.
+#
+foreach {tn create rows tbl nm after} {
+ 1   {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT)}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID}
+ 2   {CREATE TABLE t1(a TEXT PRIMARY KEY, b INT)}
+     {INSERT INTO t1 VALUES('k',1),('j',2);}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a TEXT PRIMARY KEY, b INT) WITHOUT ROWID}
+ 3   {CREATE TABLE t1(a INT, b INT, PRIMARY KEY(a,b))}
+     {INSERT INTO t1 VALUES(1,2),(3,4);}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT, b INT, PRIMARY KEY(a,b)) WITHOUT ROWID}
+ 4   {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) STRICT}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID, STRICT}
+ 5   {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT NOT NULL DEFAULT 'q')}
+     {INSERT INTO t1(a) VALUES(1);}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT NOT NULL DEFAULT 'q') WITHOUT ROWID}
+ 6   {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT, CHECK(a>0))}
+     {INSERT INTO t1 VALUES(1,'x');}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT, CHECK(a>0)) WITHOUT ROWID}
+ 7   {CREATE TABLE "a b"(x INT PRIMARY KEY, y)}
+     {}
+     {"a b"}
+     {a b}
+     {CREATE TABLE "a b"(x INT PRIMARY KEY, y) WITHOUT ROWID}
+ 8   {CREATE TABLE t1(a INT PRIMARY KEY, b INT GENERATED ALWAYS AS (a+1) STORED)}
+     {INSERT INTO t1(a) VALUES(5);}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT PRIMARY KEY, b INT GENERATED ALWAYS AS (a+1) STORED) WITHOUT ROWID}
+ 9   {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT COLLATE nocase UNIQUE)}
+     {INSERT INTO t1 VALUES(1,'X');}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT COLLATE nocase UNIQUE) WITHOUT ROWID}
+} {
+  reset_db
+  do_execsql_test 1.$tn.0 $create
+  if {$rows ne ""} { do_execsql_test 1.$tn.1 $rows }
+  do_execsql_test 1.$tn.2 "ALTER TABLE $tbl SET WITHOUT_ROWID = ON" {}
+  do_execsql_test 1.$tn.3 {
+    SELECT sql FROM sqlite_schema WHERE type='table' AND sql IS NOT NULL
+  } [list $after]
+  do_execsql_test 1.$tn.4 {
+    SELECT count(*) FROM pragma_table_list WHERE name=$nm AND wr=1
+  } {1}
+  do_execsql_test 1.$tn.5 { PRAGMA integrity_check } {ok}
+}
+
+#-------------------------------------------------------------------------
+# Turning it off.  The option list is rebuilt from what the table has now,
+# so STRICT survives wherever it was written.
+#
+foreach {tn create tbl nm after} {
+ 1   {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT)}
+ 2   {CREATE TABLE t1(a TEXT PRIMARY KEY, b INT) WITHOUT ROWID}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a TEXT PRIMARY KEY, b INT)}
+ 3   {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID, STRICT}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) STRICT}
+ 4   {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) STRICT, WITHOUT ROWID}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) STRICT}
+} {
+  reset_db
+  do_execsql_test 2.$tn.0 $create
+  do_execsql_test 2.$tn.1 "ALTER TABLE $tbl SET WITHOUT_ROWID = OFF" {}
+  do_execsql_test 2.$tn.2 {
+    SELECT sql FROM sqlite_schema WHERE type='table' AND sql IS NOT NULL
+  } [list $after]
+  do_execsql_test 2.$tn.3 {
+    SELECT count(*) FROM pragma_table_list WHERE name=$nm AND wr=0
+  } {1}
+  do_execsql_test 2.$tn.4 { PRAGMA integrity_check } {ok}
+}
+
+#-------------------------------------------------------------------------
+# Rows survive the copy with their values and storage classes intact, and
+# a round trip gives back exactly what the table started with.
+#
+reset_db
+do_execsql_test 3.0 {
+  CREATE TABLE t1(k INT PRIMARY KEY, v);
+  INSERT INTO t1 VALUES(1,'abc'),(2,3.5),(3,x'ff'),(4,NULL),(5,9);
+}
+do_execsql_test 3.1 {
+  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  SELECT k, typeof(v), quote(v) FROM t1 ORDER BY k;
+} {1 text 'abc' 2 real 3.5 3 blob X'FF' 4 null NULL 5 integer 9}
+do_execsql_test 3.2 {
+  ALTER TABLE t1 SET WITHOUT_ROWID = OFF;
+  SELECT k, typeof(v), quote(v) FROM t1 ORDER BY k;
+} {1 text 'abc' 2 real 3.5 3 blob X'FF' 4 null NULL 5 integer 9}
+do_execsql_test 3.3 {
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(k INT PRIMARY KEY, v)}}
+
+# A converted table is indistinguishable from one created that way.
+#
+do_execsql_test 3.4 {
+  CREATE TABLE t2(k INT PRIMARY KEY, v) WITHOUT ROWID;
+  CREATE TABLE t3(k INT PRIMARY KEY, v);
+  ALTER TABLE t3 SET WITHOUT_ROWID = ON;
+  SELECT (SELECT replace(sql,'t2','X') FROM sqlite_schema WHERE name='t2')
+      == (SELECT replace(sql,'t3','X') FROM sqlite_schema WHERE name='t3');
+} {1}
+
+#-------------------------------------------------------------------------
+# Indexes and triggers are dropped along with the original table and have
+# to come back.  Automatic indexes are not replayed: the new table makes
+# whatever ones its own definition calls for.
+#
+reset_db
+do_execsql_test 4.0 {
+  CREATE TABLE t1(a INT PRIMARY KEY, b TEXT);
+  CREATE INDEX i1 ON t1(b);
+  CREATE UNIQUE INDEX i2 ON t1(b,a);
+  CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END;
+  INSERT INTO t1 VALUES(1,'x');
+  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  SELECT type, name, coalesce(sql,'-') FROM sqlite_schema ORDER BY name;
+} {index i1 {CREATE INDEX i1 ON t1(b)} index i2 {CREATE UNIQUE INDEX i2 ON t1(b,a)} trigger r1 {CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END} table t1 {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID}}
+
+do_execsql_test 4.1 { PRAGMA integrity_check } {ok}
+
+# The replayed trigger really is attached to the new table.
+#
+do_execsql_test 4.2 {
+  CREATE TABLE log(x);
+  DROP TRIGGER r1;
+  CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN INSERT INTO log VALUES(new.a); END;
+  ALTER TABLE t1 SET WITHOUT_ROWID = OFF;
+  INSERT INTO t1 VALUES(7,'q');
+  SELECT x FROM log;
+} {7}
+
+#-------------------------------------------------------------------------
+# The conversion is part of the surrounding transaction.
+#
+reset_db
+do_execsql_test 5.0 {
+  CREATE TABLE t1(a INT PRIMARY KEY, b);
+  INSERT INTO t1 VALUES(1,'x');
+  BEGIN;
+  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  ROLLBACK;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT PRIMARY KEY, b)}}
+do_execsql_test 5.1 {
+  BEGIN;
+  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  COMMIT;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT PRIMARY KEY, b) WITHOUT ROWID}}
+do_execsql_test 5.2 { SELECT a, b FROM t1 } {1 x}
+
+#-------------------------------------------------------------------------
+# The temp schema.  A change here hard-expires every prepared statement,
+# the one doing the rebuild included, so this used to fail between the
+# phases with "abort due to ROLLBACK".
+#
+reset_db
+do_execsql_test 6.0 {
+  CREATE TEMP TABLE t1(a INT PRIMARY KEY, b);
+  CREATE INDEX i1 ON t1(b);
+  INSERT INTO t1 VALUES(1,'x');
+  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  SELECT type, name, coalesce(sql,'-') FROM sqlite_temp_schema ORDER BY name;
+} {index i1 {CREATE INDEX i1 ON t1(b)} table t1 {CREATE TABLE t1(a INT PRIMARY KEY, b) WITHOUT ROWID}}
+do_execsql_test 6.1 { SELECT a, b FROM t1 } {1 x}
+do_execsql_test 6.2 {
+  ALTER TABLE t1 SET WITHOUT_ROWID = OFF;
+  SELECT sql FROM sqlite_temp_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT PRIMARY KEY, b)}}
+
+# A TEMP trigger on a table in another schema is recorded in
+# temp.sqlite_schema, not the table's own, but the drop still takes it
+# down.  It has to be collected from there and put back.
+#
+reset_db
+do_execsql_test 6.3 {
+  CREATE TABLE t1(a INT PRIMARY KEY, b);
+  CREATE TABLE log(x);
+  CREATE TEMP TRIGGER r1 AFTER INSERT ON t1 BEGIN INSERT INTO log VALUES(new.a); END;
+  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  SELECT type, name FROM sqlite_temp_schema;
+} {trigger r1}
+do_execsql_test 6.4 {
+  INSERT INTO t1 VALUES(7,'q');
+  SELECT x FROM log;
+} {7}
+
+# Unless TEMP has a table of that name itself, in which case the trigger
+# belongs to that one and the drop never touches it.
+#
+reset_db
+do_execsql_test 6.5 {
+  CREATE TABLE t1(a INT PRIMARY KEY, b);
+  CREATE TEMP TABLE t1(a INT PRIMARY KEY, b);
+  CREATE TEMP TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END;
+  ALTER TABLE main.t1 SET WITHOUT_ROWID = ON;
+  SELECT type, name FROM sqlite_temp_schema WHERE type='trigger';
+} {trigger r1}
+do_execsql_test 6.6 {
+  SELECT sql FROM main.sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT PRIMARY KEY, b) WITHOUT ROWID}}
+do_execsql_test 6.7 {
+  SELECT count(*) FROM pragma_table_list WHERE name='t1' AND schema='temp' AND wr=0;
+} {1}
+
+#-------------------------------------------------------------------------
+# An attached schema.  The replacement table and the replayed DDL have to
+# land there and not in main.
+#
+reset_db
+forcedelete test.db2
+do_execsql_test 7.0 {
+  ATTACH 'test.db2' AS aux;
+  CREATE TABLE aux.t1(a INT PRIMARY KEY, b);
+  CREATE INDEX aux.i1 ON t1(b);
+  INSERT INTO aux.t1 VALUES(1,'x');
+  ALTER TABLE aux.t1 SET WITHOUT_ROWID = ON;
+  SELECT type, name, coalesce(sql,'-') FROM aux.sqlite_schema ORDER BY name;
+} {index i1 {CREATE INDEX i1 ON t1(b)} table t1 {CREATE TABLE t1(a INT PRIMARY KEY, b) WITHOUT ROWID}}
+do_execsql_test 7.1 { SELECT a, b FROM aux.t1 } {1 x}
+do_execsql_test 7.2 { SELECT count(*) FROM main.sqlite_schema } {0}
+do_execsql_test 7.3 { PRAGMA aux.integrity_check } {ok}
+
+#-------------------------------------------------------------------------
+# Refusals.  Each leaves the schema exactly as it was.
+#
+reset_db
+do_catchsql_test 8.0 {
+  CREATE TABLE t1(a INT, b TEXT);
+  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+} {1 {PRIMARY KEY missing on table t1}}
+do_execsql_test 8.1 {
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT, b TEXT)}}
+
+reset_db
+do_catchsql_test 8.2 {
+  CREATE TABLE t1(a INTEGER PRIMARY KEY AUTOINCREMENT, b);
+  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+} {1 {AUTOINCREMENT not allowed on WITHOUT ROWID tables}}
+
+# The drop between the phases would fire foreign key actions on rows in
+# other tables, and foreign_keys cannot be turned off inside a
+# transaction, so this is refused up front.
+#
+reset_db
+do_catchsql_test 8.3 {
+  PRAGMA foreign_keys=ON;
+  CREATE TABLE p(a INT PRIMARY KEY);
+  CREATE TABLE c(x INT REFERENCES p(a));
+  ALTER TABLE p SET WITHOUT_ROWID = ON;
+} {1 {cannot rebuild p while foreign keys are enabled: table c refers to it}}
+do_execsql_test 8.4 {
+  SELECT count(*) FROM pragma_table_list WHERE name='p' AND wr=1;
+} {0}
+
+# With foreign keys off, the same schema converts.
+#
+reset_db
+do_execsql_test 8.5 {
+  PRAGMA foreign_keys=OFF;
+  CREATE TABLE p(a INT PRIMARY KEY);
+  CREATE TABLE c(x INT REFERENCES p(a));
+  INSERT INTO p VALUES(1);
+  INSERT INTO c VALUES(1);
+  ALTER TABLE p SET WITHOUT_ROWID = ON;
+  SELECT (SELECT a FROM p), (SELECT x FROM c);
+} {1 1}
+
+# Both phases derive the replacement's name from the table's, so a table
+# already sitting on that name is in the way.
+#
+reset_db
+do_catchsql_test 8.6 {
+  CREATE TABLE t1(a INT PRIMARY KEY, b);
+  CREATE TABLE altertab_t1(x);
+  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+} {1 {cannot rebuild t1: table altertab_t1 is in the way}}
+
+reset_db
+do_catchsql_test 8.7 {
+  CREATE VIEW v AS SELECT 1;
+  ALTER TABLE v SET WITHOUT_ROWID = ON;
+} {1 {cannot set table options on view "v"}}
+
+do_catchsql_test 8.8 {
+  ALTER TABLE nope SET WITHOUT_ROWID = ON;
+} {1 {no such table: nope}}
+
+do_catchsql_test 8.9 {
+  CREATE TABLE t1(a INT PRIMARY KEY, b);
+  ALTER TABLE t1 SET WITHOUT_ROWID = MAYBE;
+} {1 {expected ON or OFF, got: MAYBE}}
+
+do_catchsql_test 8.10 {
+  ALTER TABLE t1 SET WIDGETS = ON;
+} {1 {unknown table option: WIDGETS}}
+
+# Setting the option to what it already is does nothing at all -- in
+# particular it does not rebuild the table.
+#
+reset_db
+do_execsql_test 9.0 {
+  CREATE TABLE t1(a INT PRIMARY KEY, b) WITHOUT ROWID;
+  INSERT INTO t1 VALUES(1,'x');
+  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT PRIMARY KEY, b) WITHOUT ROWID}}
+do_execsql_test 9.1 {
+  CREATE TABLE t2(a INT PRIMARY KEY, b);
+  ALTER TABLE t2 SET WITHOUT_ROWID = OFF;
+  SELECT sql FROM sqlite_schema WHERE name='t2';
+} {{CREATE TABLE t2(a INT PRIMARY KEY, b)}}
+
+finish_test
