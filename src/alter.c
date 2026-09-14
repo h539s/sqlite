@@ -5245,6 +5245,221 @@ void sqlite3AlterDropCheck(Parse *pParse, SrcList *pSrc){
 }
 
 /*
+** Internal SQL function:
+**
+**     sqlite_set_coltype(ISCHEMA, SQL, COLNAME, TYPENAME)
+**
+** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
+** copy of it with the declared type of column COLNAME replaced by
+** TYPENAME.  The column is resolved against SQL itself, and the extent of
+** the type it currently declares comes from what the parser recorded
+** during the reparse, so a column written without a type is handled by the
+** same code: its extent is empty and sits where a type would go.
+**
+** The change is refused unless it leaves the column's affinity alone.
+**
+** That is not caution, it is the difference between an edit and a rebuild.
+** A declared type is not just documentation: it fixes the column's
+** affinity, and affinity is applied when a value is written.  The rows
+** already in the table, and the keys already in every index over the
+** column, were written under the old one.  Changing it makes the file
+** disagree with its own schema:
+**
+**   *  PRAGMA integrity_check reports "TEXT value in t.a" once a TEXT
+**      column with an index is redeclared INTEGER;
+**   *  a lookup through that index stops finding the rows, because the
+**      key the query computes is no longer the key that was stored;
+**   *  a WITHOUT ROWID table fails integrity_check the same way, its rows
+**      being held in the index that its PRIMARY KEY defines.
+**
+** Putting that right means rewriting every row and rebuilding every index
+** - a table rebuild, which is out of reach of a text edit.  So the cases
+** that need one are refused rather than half-done, and what is left is
+** the change that only ever affected the declaration: one that keeps the
+** affinity, such as VARCHAR(20) to TEXT or INT to INTEGER.
+**
+** One such change is still refused.  Exactly the word INTEGER, on the
+** PRIMARY KEY of a rowid table, makes the column an alias for the rowid;
+** INT does not, though the two have the same affinity.  Crossing that
+** line either way changes where the values live: away from INTEGER they
+** would be read back as NULL, having never been in the record at all,
+** and towards it the table's automatic index becomes an orphan and the
+** schema will not load.
+*/
+static void setColTypeFunc(
+  sqlite3_context *ctx,
+  int NotUsed,
+  sqlite3_value **argv
+){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  int iSchema = sqlite3_value_int(argv[0]);
+  const char *zSql = (const char*)sqlite3_value_text(argv[1]);
+  const char *zCol = (const char*)sqlite3_value_text(argv[2]);
+  const char *zType = (const char*)sqlite3_value_text(argv[3]);
+  const char *zDb;
+  Table *pTab;
+  ParseLoc *p;
+  Parse sParse;
+  char *zNew = 0;
+  char aOld, aNew;
+  int iCol, iStart, iEnd, nSql;
+  int bInPk = 0;
+  int rc;
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  sqlite3_xauth xAuth = db->xAuth;
+  db->xAuth = 0;
+#endif
+
+  UNUSED_PARAMETER(NotUsed);
+  if( zSql==0 || zCol==0 || zType==0 || iSchema<0 || iSchema>=db->nDb ){
+    rc = SQLITE_OK;
+    goto set_coltype_done;
+  }
+  zDb = db->aDb[iSchema].zDbSName;
+
+  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
+  if( rc!=SQLITE_OK ){
+    rc = SQLITE_CORRUPT_BKPT;
+    goto set_coltype_cleanup;
+  }
+  pTab = sParse.pNewTable;
+  if( pTab==0 || !IsOrdinaryTable(pTab) ){
+    rc = SQLITE_CORRUPT_BKPT;
+    goto set_coltype_cleanup;
+  }
+  iCol = alterColumnIndex(pTab, zCol);
+  if( iCol<0 ){
+    errorMPrintf(ctx, "no such column: %s", zCol);
+    rc = SQLITE_OK;
+    goto set_coltype_cleanup;
+  }
+  for(p=sParse.pLoc; p; p=p->pNext){
+    if( p->eType==PARSELOC_ColType && p->iCol==iCol ) break;
+  }
+  if( p==0 ){
+    rc = SQLITE_CORRUPT_BKPT;
+    goto set_coltype_cleanup;
+  }
+
+  aOld = pTab->aCol[iCol].affinity;
+  aNew = sqlite3AffinityType(zType, 0);
+  if( aOld!=aNew ){
+    errorMPrintf(ctx, "cannot change the type of column \"%s\" to \"%s\": "
+                 "that changes its affinity, and the rows and index entries "
+                 "already stored were written under the old one", zCol, zType);
+    rc = SQLITE_OK;
+    goto set_coltype_cleanup;
+  }
+
+  /* Is this column part of the PRIMARY KEY?  If so, whether its type is
+  ** exactly INTEGER decides where its values live. */
+  if( pTab->iPKey==iCol ){
+    bInPk = 1;
+  }else{
+    Index *pPk = sqlite3PrimaryKeyIndex(pTab);
+    if( pPk ){
+      int i;
+      for(i=0; i<pPk->nKeyCol; i++){
+        if( pPk->aiColumn[i]==iCol ) bInPk = 1;
+      }
+    }
+  }
+  if( bInPk ){
+    Token t;
+    int bWasInt, bIsInt;
+    t.z = p->t.z;
+    t.n = p->t.n;
+    while( t.n>0 && sqlite3Isspace(t.z[0]) ){ t.z++; t.n--; }
+    while( t.n>0 && sqlite3Isspace(t.z[t.n-1]) ){ t.n--; }
+    bWasInt = t.n==7 && sqlite3_strnicmp(t.z, "INTEGER", 7)==0;
+    bIsInt = sqlite3StrICmp(zType, "INTEGER")==0;
+    if( bWasInt!=bIsInt ){
+      errorMPrintf(ctx, "cannot change the type of PRIMARY KEY column "
+                   "\"%s\" to \"%s\": only a column declared exactly INTEGER "
+                   "holds the rowid, so this moves where its values live",
+                   zCol, zType);
+      rc = SQLITE_OK;
+      goto set_coltype_cleanup;
+    }
+  }
+
+  /* Splice the new type in.  A column that had none needs a space in front
+  ** of it; one that had a type is replaced where it stood. */
+  nSql = sqlite3Strlen30(zSql);
+  iStart = (int)(p->t.z - zSql);
+  iEnd = iStart + (int)p->t.n;
+  assert( iStart>=0 && iEnd<=nSql );
+  zNew = sqlite3MPrintf(db, "%.*s%s%s%s", iStart, zSql,
+                        p->t.n==0 ? " " : "", zType, &zSql[iEnd]);
+  if( zNew==0 ){
+    rc = SQLITE_NOMEM_BKPT;
+    goto set_coltype_cleanup;
+  }
+  sqlite3_result_text(ctx, zNew, -1, SQLITE_TRANSIENT);
+
+set_coltype_cleanup:
+  renameParseCleanup(&sParse);
+  sqlite3DbFree(db, zNew);
+
+set_coltype_done:
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  db->xAuth = xAuth;
+#endif
+  if( rc!=SQLITE_OK ){
+    sqlite3_result_error_code(ctx, rc);
+  }
+}
+
+/*
+** Implement "ALTER TABLE <table> COLUMN <column> SET TYPE <type>".
+**
+** Only the stored text changes.  What may and may not be asked for is
+** decided by setColTypeFunc(), against the statement it is about to edit.
+*/
+void sqlite3AlterSetColumnType(
+  Parse *pParse,
+  SrcList *pSrc,
+  Token *pCol,
+  Token *pType
+){
+  sqlite3 *db = pParse->db;
+  Table *pTab;
+  int iDb = 0;
+  int iDummy;
+  const char *zDb = 0;
+  char *zCol = 0;
+  char *zType = 0;
+
+  assert( pSrc->nSrc==1 );
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
+  if( pTab==0 ) return;
+  if( pType->n==0 ){
+    sqlite3ErrorMsg(pParse, "no type given for column \"%T\"", pCol);
+    return;
+  }
+  /* alterFindCol() is what authorizes the change and reports an unknown
+  ** column; the index it returns is not used, the editor resolving the
+  ** name against the text it is about to edit. */
+  if( alterFindCol(pParse, pTab, pCol, &iDummy) ) return;
+  zCol = sqlite3NameFromToken(db, pCol);
+  zType = sqlite3DbStrNDup(db, pType->z, pType->n);
+  if( zCol==0 || zType==0 ) goto set_type_exit;
+
+  sqlite3NestedParse(pParse,
+      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
+      "sql = sqlite_set_coltype(%d, sql, %Q, %Q) "
+      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
+      , zDb, iDb, zCol, zType, pTab->zName
+  );
+
+  renameReloadSchema(pParse, iDb, INITFLAG_AlterSetType);
+
+set_type_exit:
+  sqlite3DbFree(db, zCol);
+  sqlite3DbFree(db, zType);
+}
+
+/*
 ** Register built-in functions used to help implement ALTER TABLE
 */
 void sqlite3AlterFunctions(void){
@@ -5258,6 +5473,7 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_drop_notnull,   3, dropNotNullFunc),
     INTERNAL_FUNCTION(sqlite_drop_default,   3, dropDefaultFunc),
     INTERNAL_FUNCTION(sqlite_drop_check,     3, dropCheckFunc),
+    INTERNAL_FUNCTION(sqlite_set_coltype,    4, setColTypeFunc),
     INTERNAL_FUNCTION(sqlite_drop_fk,       -1, dropFkFunc),
     INTERNAL_FUNCTION(sqlite_drop_pk,        2, dropPkFunc),
     INTERNAL_FUNCTION(sqlite_fail,           2, failConstraintFunc),

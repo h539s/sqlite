@@ -4316,13 +4316,14 @@ typedef struct {
 /*
 ** Allowed values for mInitFlags
 */
-#define INITFLAG_AlterMask     0x0007  /* Types of ALTER */
+#define INITFLAG_AlterMask     0x000f  /* Types of ALTER */
 #define INITFLAG_AlterRename   0x0001  /* Reparse after a RENAME */
 #define INITFLAG_AlterDrop     0x0002  /* Reparse after a DROP COLUMN */
 #define INITFLAG_AlterAdd      0x0003  /* Reparse after an ADD COLUMN */
 #define INITFLAG_AlterDropCons 0x0004  /* Reparse after a DROP CONSTRAINT */
 #define INITFLAG_AlterAddCons  0x0005  /* Reparse after an ADD CONSTRAINT */
 #define INITFLAG_AlterSetOpt   0x0006  /* Reparse after SET <table-option> */
+#define INITFLAG_AlterSetType  0x0007  /* Reparse after SET TYPE */
 
 /* Tuning parameters are set using SQLITE_TESTCTRL_TUNE and are controlled
 ** on debug-builds of the CLI using ".testctrl tune ID VALUE".  Tuning
@@ -5625,6 +5626,7 @@ void sqlite3AlterDropPrimaryKey(Parse*, SrcList*);
 void sqlite3AlterDropForeignKey(Parse*,SrcList*,ExprList*,Token*,
                                 ExprList*);
 void sqlite3AlterDropCheck(Parse*, SrcList*);
+void sqlite3AlterSetColumnType(Parse*, SrcList*, Token*, Token*);
 void sqlite3AlterAddNamedConstraint(Parse*,SrcList*,Token*,Token*,int,
                                     ExprList*,const char*,int);
 void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Token*,Token*,Expr*,
@@ -5648,6 +5650,7 @@ void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 #define PARSELOC_Default   4
 #define PARSELOC_ForeignKey 5
 #define PARSELOC_Check     6
+#define PARSELOC_ColType   7
 const void *sqlite3RenameTokenMap(Parse*, const void*, const Token*);
 void sqlite3RenameTokenRemap(Parse*, const void *pTo, const void *pFrom);
 void sqlite3RenameExprUnmap(Parse*, Expr*);
