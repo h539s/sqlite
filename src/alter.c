@@ -2596,6 +2596,34 @@ void sqlite3ColDefLocExtend(Parse *pParse){
 }
 
 /*
+** Record where a CHECK constraint sits, so that ALTER TABLE ... DROP CHECK
+** can cut it out without looking for it.
+**
+** pKw is the CHECK keyword.  sqlite3ConsLocAdd() takes in everything that
+** follows it up to the end of the last real token - the parenthesised
+** expression, and the ON CONFLICT clause a table-level CHECK may carry -
+** and an immediately preceding "CONSTRAINT <name>".
+**
+** bCol says which form was written.  SQLite draws no distinction between
+** the two: pTab->pCheck is a flat list, a CHECK written on a column may
+** refer to any column of the table, and it is enforced exactly as a
+** table-level one is.  The only thing that makes a CHECK belong to a
+** column is that it was written inside that column's definition, so that
+** is what is recorded here and what DROP CHECK goes by.
+*/
+void sqlite3CheckLocAdd(Parse *pParse, Token *pKw, int bCol){
+  Table *p = pParse->pNewTable;
+  int iCol = -1;
+  assert( IN_RENAME_OBJECT );
+  if( p==0 ) return;
+  if( bCol ){
+    if( p->nCol<=0 ) return;
+    iCol = p->nCol-1;
+  }
+  sqlite3ConsLocAdd(pParse, PARSELOC_Check, iCol, pKw->z, &pKw->z[pKw->n]);
+}
+
+/*
 ** Extend the most recently recorded FOREIGN KEY extent to zEnd, so that a
 ** column-level DEFERRABLE clause leaves with the key it belongs to.
 **
@@ -3047,7 +3075,8 @@ static int alterExciseClause(
 static void dropColConsFunc(
   sqlite3_context *ctx,
   sqlite3_value **argv,
-  u8 eType                        /* PARSELOC_NotNull or PARSELOC_Default */
+  u8 eType,                       /* Kind of clause to remove */
+  int bAnyCol                     /* True if a NULL COLNAME means "all" */
 ){
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   int iSchema = sqlite3_value_int(argv[0]);
@@ -3065,7 +3094,9 @@ static void dropColConsFunc(
   db->xAuth = 0;
 #endif
 
-  if( zSql==0 || zCol==0 || iSchema<0 || iSchema>=db->nDb ){
+  if( zSql==0 || iSchema<0 || iSchema>=db->nDb
+   || (zCol==0 && !bAnyCol)
+  ){
     rc = SQLITE_OK;
     goto drop_notnull_done;
   }
@@ -3083,6 +3114,11 @@ static void dropColConsFunc(
     rc = SQLITE_CORRUPT_BKPT;
     goto drop_notnull_cleanup;
   }
+  if( zCol==0 ){
+    /* Every clause of this kind, wherever it was written. */
+    iCol = -2;
+    goto drop_notnull_edit;
+  }
   iCol = alterColumnIndex(pTab, zCol);
   if( iCol<0 ){
     /* The stored definition has no such column.  That definition is what the
@@ -3093,6 +3129,7 @@ static void dropColConsFunc(
     goto drop_notnull_cleanup;
   }
 
+drop_notnull_edit:
   nOut = sqlite3Strlen30(zSql);
   zOut = sqlite3DbMallocRaw(db, (i64)nOut+1);
   if( zOut==0 ){
@@ -3111,11 +3148,14 @@ static void dropColConsFunc(
     ParseLoc *pBest = 0;
 
     for(p=sParse.pLoc; p; p=p->pNext){
-      if( p->eType!=eType || p->iCol!=iCol ) continue;
+      if( p->eType!=eType ) continue;
+      if( iCol!=-2 && p->iCol!=iCol ) continue;
       if( pBest==0 || p->t.z>pBest->t.z ) pBest = p;
     }
     if( pBest==0 ) break;
-    pBest->iCol = -1;
+    pBest->eType = 0;      /* Mark it done.  iCol cannot be used for this:
+                           ** -1 is a real value, meaning a table-level
+                           ** constraint rather than one on a column. */
     nOut = alterExciseClause(zOut, nOut, zSql, &pBest->t);
   }
 
@@ -3143,7 +3183,7 @@ static void dropNotNullFunc(
   sqlite3_value **argv
 ){
   UNUSED_PARAMETER(NotUsed);
-  dropColConsFunc(ctx, argv, PARSELOC_NotNull);
+  dropColConsFunc(ctx, argv, PARSELOC_NotNull, 0);
 }
 
 /*
@@ -3155,7 +3195,24 @@ static void dropDefaultFunc(
   sqlite3_value **argv
 ){
   UNUSED_PARAMETER(NotUsed);
-  dropColConsFunc(ctx, argv, PARSELOC_Default);
+  dropColConsFunc(ctx, argv, PARSELOC_Default, 0);
+}
+
+/*
+** Internal SQL function sqlite_drop_check(ISCHEMA, SQL, COLNAME).
+**
+** A NULL COLNAME removes every CHECK the table has, wherever it was
+** written.  Otherwise only those written inside that column's definition
+** go; a table-level CHECK that happens to mention the column stays, since
+** it was not written as part of it.
+*/
+static void dropCheckFunc(
+  sqlite3_context *ctx,
+  int NotUsed,
+  sqlite3_value **argv
+){
+  UNUSED_PARAMETER(NotUsed);
+  dropColConsFunc(ctx, argv, PARSELOC_Check, 1);
 }
 
 /*
@@ -5158,6 +5215,33 @@ drop_fk_exit:
 }
 
 /*
+** Implement "ALTER TABLE <table> DROP CHECK", the form that names no
+** column.  Every CHECK the table has goes, whether it was written inside a
+** column definition or at the end of the list.
+**
+** The form that does name a column goes through sqlite3AlterDropConstraint()
+** like the other per-column editors; only the target differs.
+*/
+void sqlite3AlterDropCheck(Parse *pParse, SrcList *pSrc){
+  Table *pTab;
+  int iDb = 0;
+  const char *zDb = 0;
+
+  assert( pSrc->nSrc==1 );
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
+  if( pTab==0 ) return;
+
+  sqlite3NestedParse(pParse,
+      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
+      "sql = sqlite_drop_check(%d, sql, NULL) "
+      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
+      , zDb, iDb, pTab->zName
+  );
+
+  renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
+}
+
+/*
 ** Register built-in functions used to help implement ALTER TABLE
 */
 void sqlite3AlterFunctions(void){
@@ -5170,6 +5254,7 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_drop_constraint,2, dropConstraintFunc),
     INTERNAL_FUNCTION(sqlite_drop_notnull,   3, dropNotNullFunc),
     INTERNAL_FUNCTION(sqlite_drop_default,   3, dropDefaultFunc),
+    INTERNAL_FUNCTION(sqlite_drop_check,     3, dropCheckFunc),
     INTERNAL_FUNCTION(sqlite_drop_fk,       -1, dropFkFunc),
     INTERNAL_FUNCTION(sqlite_drop_pk,        2, dropPkFunc),
     INTERNAL_FUNCTION(sqlite_fail,           2, failConstraintFunc),

@@ -443,7 +443,10 @@ ccons ::= PRIMARY(P) KEY sortorder(Z) onconf(R) autoinc(I). {
 }
 ccons ::= UNIQUE onconf(R).      {sqlite3CreateIndex(pParse,0,0,0,0,R,0,0,0,0,
                                    SQLITE_IDXTYPE_UNIQUE);}
-ccons ::= CHECK LP(A) expr(X) RP(B).  {sqlite3AddCheckConstraint(pParse,X,A.z,B.z);}
+ccons ::= CHECK(C) LP(A) expr(X) RP(B). {
+  sqlite3AddCheckConstraint(pParse,X,A.z,B.z);
+  if( IN_RENAME_OBJECT ) sqlite3CheckLocAdd(pParse, &C, 1);
+}
 ccons ::= REFERENCES(F) nm(T) eidlist_opt(TA) refargs(R).
                              {sqlite3CreateForeignKey(pParse,0,&T,TA,R,&F);}
 // A column-level REFERENCES is followed by its DEFERRABLE clause, if any, as
@@ -516,8 +519,10 @@ tcons ::= PRIMARY(P) KEY LP sortlist(X) autoinc(I) RP onconf(R). {
 tcons ::= UNIQUE LP sortlist(X) RP onconf(R).
                                  {sqlite3CreateIndex(pParse,0,0,0,X,R,0,0,0,0,
                                        SQLITE_IDXTYPE_UNIQUE);}
-tcons ::= CHECK LP(A) expr(E) RP(B) onconf.
-                                 {sqlite3AddCheckConstraint(pParse,E,A.z,B.z);}
+tcons ::= CHECK(C) LP(A) expr(E) RP(B) onconf. {
+  sqlite3AddCheckConstraint(pParse,E,A.z,B.z);
+  if( IN_RENAME_OBJECT ) sqlite3CheckLocAdd(pParse, &C, 0);
+}
 tcons ::= FOREIGN(F) KEY LP eidlist(FA) RP
           REFERENCES nm(T) eidlist_opt(TA) refargs(R) defer_subclause_opt(D). {
     sqlite3CreateForeignKey(pParse, FA, &T, TA, R, &F);
@@ -1974,6 +1979,18 @@ cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT DEFAULT nm(Y). {
 cmd ::= ALTER TABLE fullname(X) DROP FOREIGN KEY LP eidlist(F) RP
         REFERENCES nm(T) eidlist_opt(TA). {
   sqlite3AlterDropForeignKey(pParse, X, F, &T, TA);
+}
+// A CHECK need not have a name, and SQLite draws no distinction between one
+// written on a column and one written on the table - pTab->pCheck is a flat
+// list and a column-level CHECK may refer to any column.  What makes a CHECK
+// belong to a column is that it was written inside that column's definition,
+// so naming a column removes those and leaves a table-level CHECK alone even
+// when it mentions the column.  Naming none removes every CHECK there is.
+cmd ::= ALTER TABLE fullname(X) DROP CHECK. {
+  sqlite3AlterDropCheck(pParse, X);
+}
+cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) DROP CHECK. {
+  sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_check");
 }
 cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) DROP NOT NULL. {
   sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_notnull");
