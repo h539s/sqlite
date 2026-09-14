@@ -1388,6 +1388,7 @@ typedef struct Lookaside Lookaside;
 typedef struct LookasideSlot LookasideSlot;
 typedef struct Module Module;
 typedef struct NameContext NameContext;
+typedef struct NotNullLoc NotNullLoc;
 typedef struct OnOrUsing OnOrUsing;
 typedef struct Parse Parse;
 typedef struct ParseCleanup ParseCleanup;
@@ -3998,6 +3999,8 @@ struct Parse {
       int regRowid;         /* Register holding rowid of CREATE TABLE entry */
       int regRoot;          /* Register holding root page for new objects */
       Token constraintName; /* Name of the constraint currently being parsed */
+      const char *zConsKw;  /* Start of the CONSTRAINT keyword for that name */
+      const char *zConsEnd; /* First byte past the end of constraintName */
     } cr;
     struct {  /* These fields available to all other statements */
       Returning *pReturning; /* The RETURNING clause */
@@ -4045,6 +4048,8 @@ struct Parse {
   With *pWith;              /* Current WITH clause, or NULL */
 #ifndef SQLITE_OMIT_ALTERTABLE
   RenameToken *pRename;     /* Tokens subject to renaming by ALTER TABLE */
+  NotNullLoc *pNotNull;     /* Text extent of each NOT NULL clause seen.  Only
+                            ** collected when IN_RENAME_OBJECT. */
 #endif
 };
 
@@ -5101,7 +5106,7 @@ void sqlite3StartTable(Parse*,Token*,Token*,int,int,int,int);
 # define sqlite3ColumnPropertiesFromName(T,C) /* no-op */
 #endif
 void sqlite3AddColumn(Parse*,Token,Token);
-void sqlite3AddNotNull(Parse*, int);
+void sqlite3AddNotNull(Parse*, int, const char*, const char*);
 void sqlite3AddPrimaryKey(Parse*, ExprList*, int, int, int);
 void sqlite3AddCheckConstraint(Parse*, Expr*, const char*, const char*);
 void sqlite3AddDefaultValue(Parse*,Expr*,const char*,const char*);
@@ -5597,6 +5602,8 @@ void sqlite3ColumnDefault(Vdbe *, Table *, int, int);
 void sqlite3AlterFinishAddColumn(Parse *, Token *);
 void sqlite3AlterBeginAddColumn(Parse *, SrcList *);
 void sqlite3AlterDropColumn(Parse*, SrcList*, const Token*);
+void sqlite3NotNullLocAdd(Parse*, int, const char*, const char*);
+void sqlite3NotNullLocFree(sqlite3*, NotNullLoc*);
 const void *sqlite3RenameTokenMap(Parse*, const void*, const Token*);
 void sqlite3RenameTokenRemap(Parse*, const void *pTo, const void *pFrom);
 void sqlite3RenameExprUnmap(Parse*, Expr*);

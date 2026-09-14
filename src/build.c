@@ -1652,6 +1652,7 @@ void sqlite3AddColumn(Parse *pParse, Token sName, Token sType){
   p->nNVCol++;
   assert( pParse->isCreate );
   pParse->u1.cr.constraintName.n = 0;
+  pParse->u1.cr.zConsKw = 0;
 }
 
 /*
@@ -1660,7 +1661,12 @@ void sqlite3AddColumn(Parse *pParse, Token sName, Token sType){
 ** been seen on a column.  This routine sets the notNull flag on
 ** the column currently under construction.
 */
-void sqlite3AddNotNull(Parse *pParse, int onError){
+void sqlite3AddNotNull(
+  Parse *pParse,        /* Parsing context */
+  int onError,          /* OE_ code from the ON CONFLICT clause */
+  const char *zStart,   /* First byte of the "NOT" keyword */
+  const char *zEnd      /* First byte past the "NULL" keyword */
+){
   Table *p;
   Column *pCol;
   p = pParse->pNewTable;
@@ -1668,6 +1674,14 @@ void sqlite3AddNotNull(Parse *pParse, int onError){
   pCol = &p->aCol[p->nCol-1];
   pCol->notNull = (u8)onError;
   p->tabFlags |= TF_HasNotNull;
+
+  /* Record where this constraint lives within the text being parsed, so
+  ** that ALTER TABLE ... DROP NOT NULL can excise it without having to
+  ** hunt for it with a lexical scan.  Only done for the reparse of a
+  ** stored CREATE TABLE statement - see renameParseSql().  */
+  if( IN_RENAME_OBJECT ){
+    sqlite3NotNullLocAdd(pParse, p->nCol-1, zStart, zEnd);
+  }
 
   /* Set the uniqNotNull flag on any UNIQUE or PK indexes already created
   ** on this column.  */
