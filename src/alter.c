@@ -3427,6 +3427,209 @@ void sqlite3AlterAddConstraint(
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
 }
 
+static void alterAddConstraintText(
+  Parse *pParse,        /* Parse context */
+  Table *pTab,          /* Table being altered */
+  int iDb,              /* Schema holding pTab */
+  const char *zDb,      /* Name of that schema */
+  const char *zName,    /* Name of the new constraint */
+  const char *zCons,    /* Text of the constraint to store */
+  int nCons,            /* Bytes of zCons to use */
+  int iCol              /* Column to attach it to, or -1 for the table */
+){
+  sqlite3NestedParse(pParse,
+      "SELECT sqlite_fail('constraint %q already exists', %d) "
+      "FROM \"%w\"." LEGACY_SCHEMA_TABLE " "
+      "WHERE type='table' AND tbl_name=%Q COLLATE nocase "
+      "AND sqlite_find_constraint(sql, %Q)",
+      zName, SQLITE_ERROR, zDb, pTab->zName, zName
+  );
+
+  sqlite3NestedParse(pParse,
+      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
+      "sql = sqlite_insert_constraint(%d, sql, %.*Q, %d) "
+      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
+      , zDb, iDb, nCons, zCons, iCol, pTab->zName
+  );
+
+  renameReloadSchema(pParse, iDb, INITFLAG_AlterAddCons);
+}
+
+static int alterCountAutoIndex(Table *pTab){
+  Index *pIdx;
+  int n = 0;
+  for(pIdx=pTab->pIndex; pIdx; pIdx=pIdx->pNext){
+    if( pIdx->idxType!=SQLITE_IDXTYPE_APPDEF ) n++;
+  }
+  return n;
+}
+
+static int alterPkIsRowidAlias(Table *pTab, ExprList *pList, const char **pzCol){
+  Expr *pExpr;
+  int iCol;
+
+  if( pTab->tabFlags & TF_WithoutRowid ) return 0;
+  if( pList==0 || pList->nExpr!=1 ) return 0;
+  if( pList->a[0].fg.sortFlags & KEYINFO_ORDER_DESC ) return 0;
+  pExpr = sqlite3ExprSkipCollate(pList->a[0].pExpr);
+  if( pExpr==0 ) return 0;
+  /* A quoted key column arrives as TK_STRING; sqlite3AddPrimaryKey() has
+  ** sqlite3StringToId() turn it into TK_ID before looking at it. */
+  if( pExpr->op!=TK_ID && pExpr->op!=TK_STRING ) return 0;
+  if( ExprHasProperty(pExpr, EP_IntValue) ) return 0;
+  iCol = sqlite3ColumnIndex(pTab, pExpr->u.zToken);
+  if( iCol<0 || pTab->aCol[iCol].eCType!=COLTYPE_INTEGER ) return 0;
+  *pzCol = pTab->aCol[iCol].zCnName;
+  return 1;
+}
+
+void sqlite3AlterAddNamedConstraint(
+  Parse *pParse,        /* Parse context */
+  SrcList *pSrc,        /* Table to add the constraint to */
+  Token *pFirst,        /* The CONSTRAINT keyword */
+  Token *pName,         /* Name of the new constraint */
+  int eType,            /* One of the ALTERCONS_* values */
+  ExprList *pList,      /* Indexed columns, or 0 for a FOREIGN KEY */
+  const char *zCols,    /* The same list as written, or 0 */
+  int nCols             /* Bytes of zCols */
+){
+  sqlite3 *db = pParse->db;
+  Table *pTab;
+  int iDb = 0;
+  const char *zDb = 0;
+  char *zName = 0;
+  const char *zCons;
+  int nCons;
+
+  assert( pSrc->nSrc==1 );
+  assert( eType==ALTERCONS_Unique || eType==ALTERCONS_PrimaryKey
+       || eType==ALTERCONS_ForeignKey );
+
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1);
+  if( pTab==0 ) goto add_named_cons_exit;
+
+  if( eType==ALTERCONS_PrimaryKey ){
+    const char *zCol = 0;
+    if( pTab->tabFlags & TF_HasPrimaryKey ){
+      sqlite3ErrorMsg(pParse, "table \"%s\" has more than one primary key",
+                      pTab->zName);
+      goto add_named_cons_exit;
+    }
+    if( alterPkIsRowidAlias(pTab, pList, &zCol) ){
+      sqlite3ErrorMsg(pParse,
+          "cannot add an INTEGER PRIMARY KEY to table \"%s\": column \"%s\" "
+          "would become an alias for the rowid", pTab->zName, zCol);
+      goto add_named_cons_exit;
+    }
+  }
+
+  zName = sqlite3NameFromToken(db, pName);
+  if( zName==0 ) goto add_named_cons_exit;
+
+  zCons = pFirst->z;
+  nCons = alterRtrimConstraint(db, zCons, pParse->sLastToken.z - zCons);
+
+  if( eType==ALTERCONS_ForeignKey ){
+    alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, -1);
+
+    if( db->flags & SQLITE_ForeignKeys ){
+      pParse->colNamesSet = 1;
+      sqlite3NestedParse(pParse,
+          "SELECT sqlite_fail('foreign key constraint %q on %q failed', %d) "
+          "FROM pragma_foreign_key_check(%Q,%Q)",
+          zName, pTab->zName, SQLITE_CONSTRAINT, pTab->zName, zDb
+      );
+    }
+  }else{
+    char *zIdx = sqlite3MPrintf(db, "sqlite_autoindex_%s_%d",
+                                pTab->zName, alterCountAutoIndex(pTab)+1);
+    if( zIdx==0 ) goto add_named_cons_exit;
+
+    if( eType==ALTERCONS_PrimaryKey && (pTab->tabFlags & TF_Strict)!=0 ){
+      sqlite3NestedParse(pParse,
+          "SELECT sqlite_fail('PRIMARY KEY %q on %q would be NULL', %d) "
+          "FROM \"%w\".\"%w\" WHERE (%.*s) IS NULL",
+          zName, pTab->zName, SQLITE_CONSTRAINT, zDb, pTab->zName, nCols, zCols
+      );
+    }
+
+    sqlite3NestedParse(pParse,
+        "CREATE UNIQUE INDEX \"%w\".\"%w\" ON \"%w\"(%.*s)",
+        zDb, zIdx, pTab->zName, nCols, zCols
+    );
+    sqlite3NestedParse(pParse,
+        "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET sql=NULL "
+        "WHERE type='index' AND name=%Q COLLATE nocase",
+        zDb, zIdx
+    );
+    sqlite3DbFree(db, zIdx);
+
+    alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, -1);
+  }
+
+add_named_cons_exit:
+  sqlite3ExprListDelete(db, pList);
+  sqlite3DbFree(db, zName);
+}
+
+void sqlite3AlterAddDefault(
+  Parse *pParse,        /* Parse context */
+  SrcList *pSrc,        /* Table to add the constraint to */
+  Token *pFirst,        /* The CONSTRAINT keyword */
+  Token *pName,         /* Name of the new constraint */
+  Token *pCol,          /* Name of the column it applies to */
+  Expr *pExpr,          /* The default value, as parsed */
+  const char *zStart,   /* First byte of the default value text */
+  const char *zEnd      /* First byte past the default value text */
+){
+  sqlite3 *db = pParse->db;
+  Table *pTab;
+  Column *pTabCol;
+  int iDb = 0;
+  int iCol = 0;
+  const char *zDb = 0;
+  char *zName = 0;
+  char *zCons = 0;
+
+  assert( pSrc->nSrc==1 );
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1);
+  if( pTab==0 ) goto add_default_exit;
+  if( alterFindCol(pParse, pTab, pCol, &iCol) ) goto add_default_exit;
+
+  if( pExpr==0 || !sqlite3ExprIsConstantOrFunction(pExpr, 0) ){
+    sqlite3ErrorMsg(pParse, "default value of column [%s] is not constant",
+                    pTab->aCol[iCol].zCnName);
+    goto add_default_exit;
+  }
+  pTabCol = &pTab->aCol[iCol];
+  if( pTabCol->colFlags & COLFLAG_GENERATED ){
+    sqlite3ErrorMsg(pParse, "cannot use DEFAULT on a generated column");
+    goto add_default_exit;
+  }
+  if( sqlite3ColumnExpr(pTab, pTabCol)!=0 ){
+    sqlite3ErrorMsg(pParse, "column \"%s\" already has a default value",
+                    pTabCol->zCnName);
+    goto add_default_exit;
+  }
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  if( db->xAuth ) sqlite3FuncAuth(pParse, pExpr);
+#endif
+
+  zName = sqlite3NameFromToken(db, pName);
+  if( zName==0 ) goto add_default_exit;
+  zCons = sqlite3MPrintf(db, "CONSTRAINT %.*s DEFAULT %.*s",
+                         (int)pName->n, pName->z, (int)(zEnd - zStart), zStart);
+  if( zCons==0 ) goto add_default_exit;
+
+  alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons,
+                         sqlite3Strlen30(zCons), iCol);
+
+add_default_exit:
+  sqlite3ExprDelete(db, pExpr);
+  sqlite3DbFree(db, zName);
+  sqlite3DbFree(db, zCons);
+}
+
 /*
 ** Register built-in functions used to help implement ALTER TABLE
 */
