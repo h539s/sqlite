@@ -1746,6 +1746,11 @@ struct sqlite3 {
   } init;
   int nVdbeActive;              /* Number of VDBEs currently running */
   int nVdbeRead;                /* Number of active VDBEs that read or write */
+#ifndef SQLITE_OMIT_ALTERTABLE
+  char **pAlterRedo;            /* NULL-terminated list of index and trigger
+                                ** DDL handed from phase 1 to phase 2 of an
+                                ** ALTER TABLE ... SET WITHOUT_ROWID */
+#endif
   int nVdbeWrite;               /* Number of active VDBEs that read and write */
   int nVdbeExec;                /* Number of nested calls to VdbeExec() */
   int nVDestroy;                /* Number of active OP_VDestroy operations */
@@ -5589,6 +5594,7 @@ void sqlite3AlterAddConstraint(
 );
 void sqlite3AlterSetNotNull(Parse*, SrcList*, Token*, Token*);
 void sqlite3AlterSetTableOption(Parse*, SrcList*, Token*, int);
+int sqlite3RunAlterTabOpt(char**, sqlite3*, int, const char*, int, int);
 i64 sqlite3GetToken(const unsigned char *, int *);
 void sqlite3NestedParse(Parse*, const char*, ...);
 void sqlite3ExpirePreparedStatements(sqlite3*, int);
