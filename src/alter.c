@@ -3815,6 +3815,176 @@ add_default_exit:
   sqlite3DbFree(db, zCons);
 }
 
+static void dropPkFunc(
+  sqlite3_context *ctx,
+  int NotUsed,
+  sqlite3_value **argv
+){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  int iSchema = sqlite3_value_int(argv[0]);
+  const char *zSql = (const char*)sqlite3_value_text(argv[1]);
+  const char *zDb;
+  ParseLoc *p;
+  Parse sParse;
+  char *zOut = 0;
+  int nOut = 0;
+  int iStart, iEnd;
+  int t = 0;
+  int rc;
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  sqlite3_xauth xAuth = db->xAuth;
+  db->xAuth = 0;
+#endif
+
+  UNUSED_PARAMETER(NotUsed);
+  if( zSql==0 || iSchema<0 || iSchema>=db->nDb ){
+    rc = SQLITE_OK;
+    goto drop_pk_done;
+  }
+  zDb = db->aDb[iSchema].zDbSName;
+
+  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
+  if( rc!=SQLITE_OK ){
+    rc = SQLITE_CORRUPT_BKPT;
+    goto drop_pk_cleanup;
+  }
+  if( sParse.pNewTable==0 || !IsOrdinaryTable(sParse.pNewTable) ){
+    rc = SQLITE_CORRUPT_BKPT;
+    goto drop_pk_cleanup;
+  }
+  for(p=sParse.pLoc; p; p=p->pNext){
+    if( p->eType==PARSELOC_PrimaryKey ) break;
+  }
+  if( p==0 ){
+    rc = SQLITE_CORRUPT_BKPT;
+    goto drop_pk_cleanup;
+  }
+
+  nOut = sqlite3Strlen30(zSql);
+  zOut = sqlite3DbMallocRaw(db, (i64)nOut+1);
+  if( zOut==0 ){
+    rc = SQLITE_NOMEM_BKPT;
+    goto drop_pk_cleanup;
+  }
+  memcpy(zOut, zSql, (size_t)nOut+1);
+
+  iStart = (int)(p->t.z - zSql);
+  iEnd = iStart + (int)p->t.n;
+  assert( iStart>=0 && iEnd<=nOut );
+  iEnd += getWhitespace((const u8*)&zOut[iEnd]);
+  sqlite3GetToken((const u8*)&zOut[iEnd], &t);
+  while( iStart>0 && sqlite3Isspace(zOut[iStart-1]) ) iStart--;
+  if( t==TK_RP || t==TK_COMMA ){
+    if( iStart>0 && zOut[iStart-1]==',' ){
+      iStart--;
+      while( iStart>0 && sqlite3Isspace(zOut[iStart-1]) ) iStart--;
+    }
+  }else{
+    zOut[iStart] = ' ';
+    iStart++;
+  }
+  assert( iStart<=iEnd );
+
+  memmove(&zOut[iStart], &zOut[iEnd], (size_t)(nOut-iEnd)+1);
+  nOut -= (iEnd - iStart);
+  sqlite3_result_text(ctx, zOut, nOut, SQLITE_TRANSIENT);
+
+drop_pk_cleanup:
+  renameParseCleanup(&sParse);
+  sqlite3DbFree(db, zOut);
+
+drop_pk_done:
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  db->xAuth = xAuth;
+#endif
+  if( rc!=SQLITE_OK ){
+    sqlite3_result_error_code(ctx, rc);
+  }
+}
+
+static int alterAutoIndexNumber(const char *zName){
+  const char *z = zName ? strrchr(zName, '_') : 0;
+  int n = 0;
+  if( z==0 ) return 0;
+  z++;
+  while( sqlite3Isdigit(z[0]) ){
+    n = n*10 + (z[0] - '0');
+    z++;
+  }
+  return z[0]==0 ? n : 0;
+}
+
+void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
+  sqlite3 *db = pParse->db;
+  Table *pTab;
+  Index *pPk;
+  int iDb = 0;
+  const char *zDb = 0;
+
+  assert( pSrc->nSrc==1 );
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1);
+  if( pTab==0 ) return;
+
+  if( (pTab->tabFlags & TF_HasPrimaryKey)==0 ){
+    sqlite3ErrorMsg(pParse, "table \"%s\" has no PRIMARY KEY", pTab->zName);
+    return;
+  }
+  if( pTab->tabFlags & TF_WithoutRowid ){
+    sqlite3ErrorMsg(pParse,
+        "cannot drop the PRIMARY KEY of WITHOUT ROWID table \"%s\"",
+        pTab->zName);
+    return;
+  }
+  if( pTab->iPKey>=0 ){
+    sqlite3ErrorMsg(pParse,
+        "cannot drop an INTEGER PRIMARY KEY from table \"%s\": column \"%s\" "
+        "holds the rowid", pTab->zName, pTab->aCol[pTab->iPKey].zCnName);
+    return;
+  }
+  pPk = sqlite3PrimaryKeyIndex(pTab);
+  if( pPk==0 ){
+    sqlite3ErrorMsg(pParse, "no index for the PRIMARY KEY of \"%s\"",
+                    pTab->zName);
+    return;
+  }
+
+  sqlite3NestedParse(pParse,
+      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
+      "sql = sqlite_drop_pk(%d, sql) "
+      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
+      , zDb, iDb, pTab->zName
+  );
+
+  sqlite3CodeDropIndex(pParse, pPk, iDb);
+
+  {
+    int n = alterAutoIndexNumber(pPk->zName);
+    while( n>0 ){
+      char *zOld = sqlite3MPrintf(db, "sqlite_autoindex_%s_%d", pTab->zName,n+1);
+      char *zNew = sqlite3MPrintf(db, "sqlite_autoindex_%s_%d", pTab->zName, n);
+      if( zOld==0 || zNew==0 ){
+        sqlite3DbFree(db, zOld);
+        sqlite3DbFree(db, zNew);
+        break;
+      }
+      if( sqlite3FindIndex(db, zOld, zDb)==0 ){
+        sqlite3DbFree(db, zOld);
+        sqlite3DbFree(db, zNew);
+        break;
+      }
+      sqlite3NestedParse(pParse,
+          "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET name=%Q "
+          "WHERE type='index' AND name=%Q", zDb, zNew, zOld
+      );
+      sqlite3DbFree(db, zOld);
+      sqlite3DbFree(db, zNew);
+      n++;
+    }
+  }
+
+  renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
+}
+
 /*
 ** Register built-in functions used to help implement ALTER TABLE
 */
@@ -3827,6 +3997,7 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_rename_quotefix,2, renameQuotefixFunc),
     INTERNAL_FUNCTION(sqlite_drop_constraint,2, dropConstraintFunc),
     INTERNAL_FUNCTION(sqlite_drop_notnull,   3, dropNotNullFunc),
+    INTERNAL_FUNCTION(sqlite_drop_pk,        2, dropPkFunc),
     INTERNAL_FUNCTION(sqlite_fail,           2, failConstraintFunc),
     INTERNAL_FUNCTION(sqlite_insert_constraint,4,insertConstraintFunc),
     INTERNAL_FUNCTION(sqlite_find_constraint,2, findConstraintFunc),

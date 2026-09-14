@@ -423,8 +423,12 @@ ccons ::= DEFAULT scantok id(X).       {
 ccons ::= NULL onconf.
 ccons ::= NOT(N) NULL(M) onconf(R).
                                  {sqlite3AddNotNull(pParse, R, N.z, &M.z[M.n]);}
-ccons ::= PRIMARY KEY sortorder(Z) onconf(R) autoinc(I).
-                                 {sqlite3AddPrimaryKey(pParse,0,R,I,Z);}
+ccons ::= PRIMARY(P) KEY sortorder(Z) onconf(R) autoinc(I). {
+  sqlite3AddPrimaryKey(pParse,0,R,I,Z);
+  if( IN_RENAME_OBJECT ){
+    sqlite3ConsLocAdd(pParse, PARSELOC_PrimaryKey, -1, P.z, &P.z[P.n]);
+  }
+}
 ccons ::= UNIQUE onconf(R).      {sqlite3CreateIndex(pParse,0,0,0,0,R,0,0,0,0,
                                    SQLITE_IDXTYPE_UNIQUE);}
 ccons ::= CHECK LP(A) expr(X) RP(B).  {sqlite3AddCheckConstraint(pParse,X,A.z,B.z);}
@@ -476,9 +480,18 @@ conslist ::= tcons.
 tconscomma ::= COMMA.          {ASSERT_IS_CREATE; pParse->u1.cr.constraintName.n = 0;
                                 pParse->u1.cr.zConsKw = 0;}
 tconscomma ::= .
-tcons ::= CONSTRAINT nm(X).    {ASSERT_IS_CREATE; pParse->u1.cr.constraintName = X;}
-tcons ::= PRIMARY KEY LP sortlist(X) autoinc(I) RP onconf(R).
-                                 {sqlite3AddPrimaryKey(pParse,X,R,I,0);}
+tcons ::= CONSTRAINT(C) nm(X).  {
+  ASSERT_IS_CREATE;
+  pParse->u1.cr.constraintName = X;
+  pParse->u1.cr.zConsKw = C.z;
+  pParse->u1.cr.zConsEnd = &X.z[X.n];
+}
+tcons ::= PRIMARY(P) KEY LP sortlist(X) autoinc(I) RP onconf(R). {
+  sqlite3AddPrimaryKey(pParse,X,R,I,0);
+  if( IN_RENAME_OBJECT ){
+    sqlite3ConsLocAdd(pParse, PARSELOC_PrimaryKey, -1, P.z, &P.z[P.n]);
+  }
+}
 tcons ::= UNIQUE LP sortlist(X) RP onconf(R).
                                  {sqlite3CreateIndex(pParse,0,0,0,X,R,0,0,0,0,
                                        SQLITE_IDXTYPE_UNIQUE);}
@@ -1918,6 +1931,9 @@ cmd ::= ALTER TABLE fullname(X) RENAME kwcolumn_opt nm(Y) TO nm(Z). {
 }
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT nm(Y). {
   sqlite3AlterDropConstraint(pParse, X, &Y, 0);
+}
+cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT PRIMARY KEY. {
+  sqlite3AlterDropPrimaryKey(pParse, X);
 }
 cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) DROP NOT NULL. {
   sqlite3AlterDropConstraint(pParse, X, 0, &Y);
