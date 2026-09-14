@@ -2551,6 +2551,22 @@ void sqlite3NotNullLocAdd(
   sqlite3ParseLocAdd(pParse, PARSELOC_NotNull, iCol, zStart, zEnd);
 }
 
+void sqlite3ColDefLocExtend(Parse *pParse){
+  Table *p = pParse->pNewTable;
+  ParseLoc *pLoc;
+  const char *zLimit;
+
+  assert( IN_RENAME_OBJECT );
+  if( p==0 || p->nCol<=0 ) return;
+  for(pLoc=pParse->pLoc; pLoc; pLoc=pLoc->pNext){
+    if( pLoc->eType==PARSELOC_ColDef && pLoc->iCol==p->nCol-1 ) break;
+  }
+  if( pLoc==0 ) return;
+  zLimit = pParse->sLastToken.z;
+  if( zLimit==0 || zLimit<=pLoc->t.z ) return;
+  pLoc->t.n = (unsigned)notNullRtrim(pLoc->t.z, zLimit);
+}
+
 /*
 ** Record one position within the text being parsed.  See the comment on
 ** struct ParseLoc for what the eType values mean.  zEnd may equal zStart,
@@ -2968,7 +2984,11 @@ drop_notnull_done:
   db->xAuth = xAuth;
 #endif
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
+    if( rc==SQLITE_ERROR && sqlite3WritableSchema(db) ){
+      sqlite3_result_value(ctx, argv[1]);
+    }else{
+      sqlite3_result_error_code(ctx, rc);
+    }
   }
 }
 
@@ -3035,7 +3055,7 @@ static void insertConstraintFunc(
       rc = SQLITE_CORRUPT_BKPT;
       goto insert_cons_cleanup;
     }
-    iOff = notNullRtrim(zSql, sParse.zConsIns);
+    iOff = (int)(sParse.zConsIns - zSql);
     zNew = sqlite3MPrintf(db, "%.*s, %s%s", iOff, zSql, zCons, &zSql[iOff]);
   }else{
     ParseLoc *p;
@@ -3046,7 +3066,7 @@ static void insertConstraintFunc(
       rc = SQLITE_CORRUPT_BKPT;
       goto insert_cons_cleanup;
     }
-    iOff = (int)(p->t.z - zSql);
+    iOff = (int)(p->t.z - zSql) + (int)p->t.n;
     zNew = sqlite3MPrintf(db, "%.*s %s%s", iOff, zSql, zCons, &zSql[iOff]);
   }
   if( zNew==0 ){
@@ -3064,7 +3084,11 @@ insert_cons_done:
   db->xAuth = xAuth;
 #endif
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
+    if( rc==SQLITE_ERROR && sqlite3WritableSchema(db) ){
+      sqlite3_result_value(ctx, argv[1]);
+    }else{
+      sqlite3_result_error_code(ctx, rc);
+    }
   }
 }
 
