@@ -1954,6 +1954,9 @@ cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(Y) nm(Z) CHECK LP(A) expr(E) RP(B
 cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) LP(A) expr(E) RP(B) onconf. {
   sqlite3AlterAddConstraint(pParse, X, &Y, 0, A.z+1, (B.z-A.z-1), E);
 }
+cmd ::= ALTER TABLE fullname(X) SET nm(Y) EQ ON. {
+  sqlite3AlterSetTableOption(pParse, X, &Y);
+}
 
 // ALTER TABLE ... ADD CONSTRAINT <name> <constraint>
 //

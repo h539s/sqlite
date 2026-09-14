@@ -35,7 +35,8 @@ static void corruptSchema(
        "drop column",
        "add column",
        "drop constraint",
-       "add constraint"
+       "add constraint",
+       "set table option"
     };
     *pData->pzErrMsg = sqlite3MPrintf(db, 
         "error in %s %s after %s: %s", azObj[0], azObj[1], 
