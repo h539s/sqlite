@@ -444,9 +444,16 @@ ccons ::= PRIMARY(P) KEY sortorder(Z) onconf(R) autoinc(I). {
 ccons ::= UNIQUE onconf(R).      {sqlite3CreateIndex(pParse,0,0,0,0,R,0,0,0,0,
                                    SQLITE_IDXTYPE_UNIQUE);}
 ccons ::= CHECK LP(A) expr(X) RP(B).  {sqlite3AddCheckConstraint(pParse,X,A.z,B.z);}
-ccons ::= REFERENCES nm(T) eidlist_opt(TA) refargs(R).
-                                 {sqlite3CreateForeignKey(pParse,0,&T,TA,R);}
-ccons ::= defer_subclause(D).    {sqlite3DeferForeignKey(pParse,D);}
+ccons ::= REFERENCES(F) nm(T) eidlist_opt(TA) refargs(R).
+                             {sqlite3CreateForeignKey(pParse,0,&T,TA,R,&F);}
+// A column-level REFERENCES is followed by its DEFERRABLE clause, if any, as
+// a separate ccons.  Take it into the extent recorded for the key, so that
+// dropping the key does not leave the clause behind to attach itself to
+// whichever key is the most recent one at that point.
+ccons ::= defer_subclause(D).    {
+  sqlite3DeferForeignKey(pParse,D);
+  if( IN_RENAME_OBJECT ) sqlite3FkLocExtend(pParse, pParse->sLastToken.z);
+}
 ccons ::= COLLATE ids(C).        {sqlite3AddCollateType(pParse, &C);}
 ccons ::= GENERATED ALWAYS AS generated.
 ccons ::= AS generated.
@@ -511,9 +518,9 @@ tcons ::= UNIQUE LP sortlist(X) RP onconf(R).
                                        SQLITE_IDXTYPE_UNIQUE);}
 tcons ::= CHECK LP(A) expr(E) RP(B) onconf.
                                  {sqlite3AddCheckConstraint(pParse,E,A.z,B.z);}
-tcons ::= FOREIGN KEY LP eidlist(FA) RP
+tcons ::= FOREIGN(F) KEY LP eidlist(FA) RP
           REFERENCES nm(T) eidlist_opt(TA) refargs(R) defer_subclause_opt(D). {
-    sqlite3CreateForeignKey(pParse, FA, &T, TA, R);
+    sqlite3CreateForeignKey(pParse, FA, &T, TA, R, &F);
     sqlite3DeferForeignKey(pParse, D);
 }
 %type defer_subclause_opt {int}
@@ -1958,6 +1965,15 @@ cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT PRIMARY KEY. {
 // as PRIMARY above.
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT DEFAULT nm(Y). {
   sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_default");
+}
+// A FOREIGN KEY need not have a name either, so it is named by what it
+// says.  The parent column list is optional here for the same reason it is
+// optional in a CREATE TABLE: a key written without one refers to the
+// parent's primary key, and only such a key is matched by such a request.
+// FOREIGN is a reserved word, so this cannot be confused with DROP COLUMN.
+cmd ::= ALTER TABLE fullname(X) DROP FOREIGN KEY LP eidlist(F) RP
+        REFERENCES nm(T) eidlist_opt(TA). {
+  sqlite3AlterDropForeignKey(pParse, X, F, &T, TA);
 }
 cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) DROP NOT NULL. {
   sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_notnull");

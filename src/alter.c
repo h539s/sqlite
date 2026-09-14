@@ -2596,6 +2596,44 @@ void sqlite3ColDefLocExtend(Parse *pParse){
 }
 
 /*
+** Extend the most recently recorded FOREIGN KEY extent to zEnd, so that a
+** column-level DEFERRABLE clause leaves with the key it belongs to.
+**
+** The table form carries its DEFERRABLE clause in the same grammar rule, so
+** the extent already covers it.  The column form does not: "a REFERENCES
+** p(x) DEFERRABLE INITIALLY DEFERRED" is two ccons, and the extent recorded
+** when the key was created stops at the end of the first.
+**
+** Left behind, that clause would not be inert.  SQLite applies a DEFERRABLE
+** clause to whichever key is the most recently created one, so after the
+** key it was written for is gone it would silently defer a different key.
+**
+** It is only this key's clause if it sits immediately after the extent, so
+** that is what is checked.  A DEFERRABLE written on a column that has no
+** REFERENCES of its own is somewhere else entirely, and the extent is left
+** as it was.
+*/
+void sqlite3FkLocExtend(Parse *pParse, const char *zEnd){
+  ParseLoc *p;
+  const char *z;
+  int t = 0;
+
+  assert( IN_RENAME_OBJECT );
+  if( zEnd==0 ) return;
+  for(p=pParse->pLoc; p; p=p->pNext){
+    if( p->eType==PARSELOC_ForeignKey ) break;
+  }
+  if( p==0 ) return;
+
+  z = &p->t.z[p->t.n];
+  if( z>zEnd ) return;
+  z += getWhitespace((const u8*)z);
+  sqlite3GetToken((const u8*)z, &t);
+  if( t!=TK_DEFERRABLE && t!=TK_NOT ) return;
+  p->t.n = (unsigned)notNullRtrim(p->t.z, zEnd);
+}
+
+/*
 ** Record where a column's DEFAULT clause sits, so that ALTER TABLE ...
 ** DROP CONSTRAINT DEFAULT can cut it out without looking for it.
 **
@@ -4013,6 +4051,163 @@ static int alterAutoIndexNumber(const char *zName){
 }
 
 /*
+** Internal SQL function:
+**
+**     sqlite_drop_fk(ISCHEMA, SQL, PARENT, NCHILD, <child...>, <parent...>)
+**
+** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
+** copy of it with every FOREIGN KEY matching the given shape removed: the
+** child columns are the NCHILD arguments after NCHILD, the parent table is
+** PARENT, and the parent columns are whatever arguments follow the child
+** ones - none of them if the key was written without a parent column list.
+**
+** A FOREIGN KEY need not have a name, so it is identified by what it says
+** rather than by what it is called.  Two keys may say the same thing; all
+** of them go.
+**
+** Pairing a key with its text:
+**
+**   Both lists are built by prepending - Table.u.tab.pFKey in
+**   sqlite3CreateForeignKey() and Parse.pLoc in sqlite3ParseLocAdd() - and
+**   the extent is recorded in the same statement that links the key, so the
+**   two run in the same order and pair off one for one.  If they somehow do
+**   not, the statement is refused rather than guessed at.
+*/
+static void dropFkFunc(
+  sqlite3_context *ctx,
+  int argc,
+  sqlite3_value **argv
+){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  int iSchema = sqlite3_value_int(argv[0]);
+  const char *zSql = (const char*)sqlite3_value_text(argv[1]);
+  const char *zTo = (const char*)sqlite3_value_text(argv[2]);
+  int nChild = sqlite3_value_int(argv[3]);
+  int nParent;
+  const char *zDb;
+  Table *pTab;
+  FKey *pFKey;
+  ParseLoc *pLoc;
+  Parse sParse;
+  char *zOut = 0;
+  int nOut = 0;
+  int nFound = 0;
+  int nKey, nRec, i;
+  int rc;
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  sqlite3_xauth xAuth = db->xAuth;
+  db->xAuth = 0;
+#endif
+
+  if( zSql==0 || zTo==0 || iSchema<0 || iSchema>=db->nDb
+   || nChild<=0 || argc<4+nChild
+  ){
+    rc = SQLITE_OK;
+    goto drop_fk_done;
+  }
+  nParent = argc - 4 - nChild;
+  zDb = db->aDb[iSchema].zDbSName;
+
+  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
+  if( rc!=SQLITE_OK ){
+    rc = SQLITE_CORRUPT_BKPT;
+    goto drop_fk_cleanup;
+  }
+  pTab = sParse.pNewTable;
+  if( pTab==0 || !IsOrdinaryTable(pTab) ){
+    rc = SQLITE_CORRUPT_BKPT;
+    goto drop_fk_cleanup;
+  }
+
+  /* The two lists must be the same length, or the pairing below is
+  ** meaningless. */
+  nKey = 0;
+  for(pFKey=pTab->u.tab.pFKey; pFKey; pFKey=pFKey->pNextFrom) nKey++;
+  nRec = 0;
+  for(pLoc=sParse.pLoc; pLoc; pLoc=pLoc->pNext){
+    if( pLoc->eType==PARSELOC_ForeignKey ) nRec++;
+  }
+  if( nKey!=nRec ){
+    rc = SQLITE_CORRUPT_BKPT;
+    goto drop_fk_cleanup;
+  }
+
+  nOut = sqlite3Strlen30(zSql);
+  zOut = sqlite3DbMallocRaw(db, (i64)nOut+1);
+  if( zOut==0 ){
+    rc = SQLITE_NOMEM_BKPT;
+    goto drop_fk_cleanup;
+  }
+  memcpy(zOut, zSql, (size_t)nOut+1);
+
+  /* Walk the two lists together.  Both are in reverse order of appearance,
+  ** so this also removes matches right to left, which keeps every extent
+  ** not yet used addressing the same byte of zOut that it did in zSql. */
+  pLoc = sParse.pLoc;
+  for(pFKey=pTab->u.tab.pFKey; pFKey; pFKey=pFKey->pNextFrom){
+    int bMatch;
+    while( pLoc && pLoc->eType!=PARSELOC_ForeignKey ) pLoc = pLoc->pNext;
+    assert( pLoc!=0 );
+
+    bMatch = pFKey->nCol==nChild && sqlite3StrICmp(pFKey->zTo, zTo)==0;
+    for(i=0; bMatch && i<nChild; i++){
+      const char *zWant = (const char*)sqlite3_value_text(argv[4+i]);
+      int iFrom = pFKey->aCol[i].iFrom;
+      assert( iFrom>=0 && iFrom<pTab->nCol );
+      if( zWant==0
+       || sqlite3StrICmp(pTab->aCol[iFrom].zCnName, zWant)!=0
+      ){
+        bMatch = 0;
+      }
+    }
+    if( bMatch ){
+      if( nParent==0 ){
+        /* The request named no parent columns, so the key must not either. */
+        for(i=0; i<nChild; i++){
+          if( pFKey->aCol[i].zCol!=0 ) bMatch = 0;
+        }
+      }else if( nParent!=nChild ){
+        bMatch = 0;
+      }else{
+        for(i=0; bMatch && i<nChild; i++){
+          const char *zWant = (const char*)sqlite3_value_text(argv[4+nChild+i]);
+          if( pFKey->aCol[i].zCol==0 || zWant==0
+           || sqlite3StrICmp(pFKey->aCol[i].zCol, zWant)!=0
+          ){
+            bMatch = 0;
+          }
+        }
+      }
+    }
+
+    if( bMatch ){
+      nOut = alterExciseClause(zOut, nOut, zSql, &pLoc->t);
+      nFound++;
+    }
+    pLoc = pLoc->pNext;
+  }
+
+  if( nFound==0 ){
+    errorMPrintf(ctx, "table \"%s\" has no such FOREIGN KEY", pTab->zName);
+    rc = SQLITE_OK;
+    goto drop_fk_cleanup;
+  }
+  sqlite3_result_text(ctx, zOut, nOut, SQLITE_TRANSIENT);
+
+drop_fk_cleanup:
+  renameParseCleanup(&sParse);
+  sqlite3DbFree(db, zOut);
+
+drop_fk_done:
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  db->xAuth = xAuth;
+#endif
+  if( rc!=SQLITE_OK ){
+    sqlite3_result_error_code(ctx, rc);
+  }
+}
+
+/*
 ** Implement "ALTER TABLE <table> DROP CONSTRAINT PRIMARY KEY".
 **
 ** A PRIMARY KEY need not be named, so it is dropped by kind.  On a rowid
@@ -4896,6 +5091,73 @@ void sqlite3AlterSetTableOption(
 }
 
 /*
+** Implement "ALTER TABLE <table> DROP FOREIGN KEY(<cols>)
+**            REFERENCES <table>(<cols>)".
+**
+** A FOREIGN KEY need not have a name, so it is dropped by what it says.
+** The shape is handed to the editor as it was written and matched against
+** the stored statement there; nothing is resolved against the in-memory
+** schema, which is only asked whether the table can be altered at all.
+**
+** Dropping a foreign key can only relax the table, never break it, so no
+** row is examined and nothing is rebuilt.  The parent's own key and any
+** index behind it belong to the parent table and are left alone.
+*/
+void sqlite3AlterDropForeignKey(
+  Parse *pParse,        /* Parsing context */
+  SrcList *pSrc,        /* The table being altered */
+  ExprList *pFromCol,   /* Columns of this table named by the key */
+  Token *pTo,           /* The parent table */
+  ExprList *pToCol      /* Columns of the parent, or 0 if none were given */
+){
+  sqlite3 *db = pParse->db;
+  Table *pTab;
+  int iDb = 0;
+  const char *zDb = 0;
+  char *zArg = 0;
+  char *zTo = 0;
+  int i;
+
+  assert( pSrc->nSrc==1 );
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
+  if( pTab==0 ) goto drop_fk_exit;
+  if( pFromCol==0 || pFromCol->nExpr<=0 ) goto drop_fk_exit;
+
+  zTo = sqlite3NameFromToken(db, pTo);
+  if( zTo==0 ) goto drop_fk_exit;
+
+  /* Build the call one name at a time rather than packing the two lists
+  ** into strings: a column name can contain anything a quoted identifier
+  ** can, so there is no separator that would not need escaping. */
+  zArg = sqlite3MPrintf(db, "sqlite_drop_fk(%d, sql, %Q, %d",
+                        iDb, zTo, pFromCol->nExpr);
+  for(i=0; zArg && i<pFromCol->nExpr; i++){
+    zArg = sqlite3MPrintf(db, "%z, %Q", zArg, pFromCol->a[i].zEName);
+  }
+  for(i=0; zArg && pToCol && i<pToCol->nExpr; i++){
+    zArg = sqlite3MPrintf(db, "%z, %Q", zArg, pToCol->a[i].zEName);
+  }
+  if( zArg==0 ) goto drop_fk_exit;
+  zArg = sqlite3MPrintf(db, "%z)", zArg);
+  if( zArg==0 ) goto drop_fk_exit;
+
+  sqlite3NestedParse(pParse,
+      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
+      "sql = %s "
+      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
+      , zDb, zArg, pTab->zName
+  );
+
+  renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
+
+drop_fk_exit:
+  sqlite3DbFree(db, zArg);
+  sqlite3DbFree(db, zTo);
+  sqlite3ExprListDelete(db, pFromCol);
+  sqlite3ExprListDelete(db, pToCol);
+}
+
+/*
 ** Register built-in functions used to help implement ALTER TABLE
 */
 void sqlite3AlterFunctions(void){
@@ -4908,6 +5170,7 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_drop_constraint,2, dropConstraintFunc),
     INTERNAL_FUNCTION(sqlite_drop_notnull,   3, dropNotNullFunc),
     INTERNAL_FUNCTION(sqlite_drop_default,   3, dropDefaultFunc),
+    INTERNAL_FUNCTION(sqlite_drop_fk,       -1, dropFkFunc),
     INTERNAL_FUNCTION(sqlite_drop_pk,        2, dropPkFunc),
     INTERNAL_FUNCTION(sqlite_fail,           2, failConstraintFunc),
     INTERNAL_FUNCTION(sqlite_insert_constraint,4,insertConstraintFunc),
