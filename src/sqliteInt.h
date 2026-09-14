@@ -5201,6 +5201,7 @@ int sqlite3IndexBloomable(const Index*,int);
 void sqlite3CreateIndex(Parse*,Token*,Token*,SrcList*,ExprList*,int,Token*,
                           Expr*, int, int, u8);
 void sqlite3DropIndex(Parse*, SrcList*, int);
+void sqlite3CodeDropIndex(Parse*, Index*, int);
 int sqlite3Select(Parse*, Select*, SelectDest*);
 Select *sqlite3SelectNew(Parse*,ExprList*,SrcList*,Expr*,ExprList*,
                          Expr*,ExprList*,u32,Expr*);
@@ -5617,7 +5618,7 @@ void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Token*,Token*,Expr*,
 #define ALTERCONS_Unique      1
 #define ALTERCONS_PrimaryKey  2
 #define ALTERCONS_ForeignKey  3
-void sqlite3NotNullLocAdd(Parse*, int, const char*, const char*);
+void sqlite3ConsLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ColDefLocExtend(Parse*);
 void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
