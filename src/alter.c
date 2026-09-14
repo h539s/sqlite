@@ -2552,6 +2552,33 @@ void sqlite3NotNullLocAdd(
 }
 
 /*
+** Widen the recorded extent of the column being parsed so that it reaches
+** the end of the constraint just reduced.  Called once per column
+** constraint, so the last call for a column leaves the extent ending where
+** that column's definition ends - which is where ALTER TABLE splices a new
+** column-constraint in, and matches where one written by hand would go.
+**
+** Parse.sLastToken holds the parser's lookahead, the first token after the
+** constraint, so it bounds the extent from above; notNullRtrim() pulls it
+** back to the last real token.
+*/
+void sqlite3ColDefLocExtend(Parse *pParse){
+  Table *p = pParse->pNewTable;
+  ParseLoc *pLoc;
+  const char *zLimit;
+
+  assert( IN_RENAME_OBJECT );
+  if( p==0 || p->nCol<=0 ) return;
+  for(pLoc=pParse->pLoc; pLoc; pLoc=pLoc->pNext){
+    if( pLoc->eType==PARSELOC_ColDef && pLoc->iCol==p->nCol-1 ) break;
+  }
+  if( pLoc==0 ) return;
+  zLimit = pParse->sLastToken.z;
+  if( zLimit==0 || zLimit<=pLoc->t.z ) return;
+  pLoc->t.n = (unsigned)notNullRtrim(pLoc->t.z, zLimit);
+}
+
+/*
 ** Record one position within the text being parsed.  See the comment on
 ** struct ParseLoc for what the eType values mean.  zEnd may equal zStart,
 ** which records a bare position rather than an extent.
@@ -2968,7 +2995,14 @@ drop_notnull_done:
   db->xAuth = xAuth;
 #endif
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
+    if( rc==SQLITE_ERROR && sqlite3WritableSchema(db) ){
+      /* The stored statement does not parse.  Under writable_schema that is
+      ** the user's own doing, and the answer the other ALTER TABLE functions
+      ** give is the text back unchanged - see renameColumnFunc(). */
+      sqlite3_result_value(ctx, argv[1]);
+    }else{
+      sqlite3_result_error_code(ctx, rc);
+    }
   }
 }
 
@@ -2988,10 +3022,8 @@ drop_notnull_done:
 **
 ** Neither position is found by searching.  The statement is reparsed and
 ** both come from what the parser recorded during that parse: Parse.zConsIns
-** for the closing ")", and the PARSELOC_ColDef entry for the column.  The
-** only text work left is stepping back over whitespace and comments in
-** front of the ")", which is cosmetic - "a INT )" would otherwise become
-** "a INT , CONSTRAINT ...".
+** for the closing ")", and the PARSELOC_ColDef entry for the column, whose
+** extent ends where that column's definition does.  No text work is left.
 */
 static void insertConstraintFunc(
   sqlite3_context *ctx,
@@ -3035,7 +3067,7 @@ static void insertConstraintFunc(
       rc = SQLITE_CORRUPT_BKPT;
       goto insert_cons_cleanup;
     }
-    iOff = notNullRtrim(zSql, sParse.zConsIns);
+    iOff = (int)(sParse.zConsIns - zSql);
     zNew = sqlite3MPrintf(db, "%.*s, %s%s", iOff, zSql, zCons, &zSql[iOff]);
   }else{
     ParseLoc *p;
@@ -3046,7 +3078,7 @@ static void insertConstraintFunc(
       rc = SQLITE_CORRUPT_BKPT;
       goto insert_cons_cleanup;
     }
-    iOff = (int)(p->t.z - zSql);
+    iOff = (int)(p->t.z - zSql) + (int)p->t.n;
     zNew = sqlite3MPrintf(db, "%.*s %s%s", iOff, zSql, zCons, &zSql[iOff]);
   }
   if( zNew==0 ){
@@ -3064,7 +3096,13 @@ insert_cons_done:
   db->xAuth = xAuth;
 #endif
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
+    if( rc==SQLITE_ERROR && sqlite3WritableSchema(db) ){
+      /* As in dropNotNullFunc(): a statement that does not parse is handed
+      ** back unchanged rather than failing, when writable_schema is on. */
+      sqlite3_result_value(ctx, argv[1]);
+    }else{
+      sqlite3_result_error_code(ctx, rc);
+    }
   }
 }
 

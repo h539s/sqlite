@@ -5619,6 +5619,7 @@ void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Token*,Token*,Expr*,
 #define ALTERCONS_ForeignKey  3
 void sqlite3NotNullLocAdd(Parse*, int, const char*, const char*);
 void sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
+void sqlite3ColDefLocExtend(Parse*);
 void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 /* Allowed values for the second argument to sqlite3ParseLocAdd().  See the
 ** comment on struct ParseLoc in alter.c for what each one records. */

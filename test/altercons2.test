@@ -20,10 +20,26 @@ ifcapable !altertable {
   return
 }
 
+# These cases corrupt the stored CREATE TABLE with writable_schema and then
+# run an ALTER against it.
+#
+# The constraint editors locate what they need by reparsing the stored
+# statement, so a statement that does not parse leaves them nothing to work
+# with.  What they do then is what renameColumnFunc() has always done in the
+# same situation: with writable_schema on, the text is handed back unchanged
+# rather than treated as an error.  The ALTER therefore succeeds as a no-op
+# and the corrupt text survives untouched.
+#
+# The earlier implementations scanned the text instead, which let them both
+# diagnose some of these as corruption and edit others of them in place.
+# Case 4 is the one that shows the difference in the result rather than in
+# the error: its NOT NULL used to be removed from text that has no closing
+# parenthesis.
+#
 foreach {tn newsql alter res final} {
   1 "CREATE TABLE t1(a, b"
     "ALTER TABLE t1 ALTER c SET NOT NULL"
-    {1 {database disk image is malformed}}
+    {0 {}}
     "CREATE TABLE t1(a, b"
 
   2 "CREATE TABLE t1(a, b, "
@@ -39,16 +55,16 @@ foreach {tn newsql alter res final} {
   4 "CREATE TABLE t1(a, b, c NOT NULL"
     "ALTER TABLE t1 ALTER c DROP NOT NULL"
     {0 {}}
-    "CREATE TABLE t1(a, b, c "
+    "CREATE TABLE t1(a, b, c NOT NULL"
 
   5 "CREATE TABLE"
     "ALTER TABLE t1 ALTER c DROP NOT NULL"
-    {1 {database disk image is malformed}}
+    {0 {}}
     "CREATE TABLE"
 
   6 "CREATE TABLE"
     "ALTER TABLE t1 ADD CONSTRAINT nn CHECK (a!=0)"
-    {1 {database disk image is malformed}}
+    {0 {}}
     "CREATE TABLE"
 
 } {
