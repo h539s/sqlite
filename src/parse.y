@@ -1934,7 +1934,7 @@ cmd ::= ALTER TABLE fullname(X) RENAME kwcolumn_opt nm(Y) TO nm(Z). {
   sqlite3AlterRenameColumn(pParse, X, &Y, &Z);
 }
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT nm(Y). {
-  sqlite3AlterDropConstraint(pParse, X, &Y, 0);
+  sqlite3AlterDropConstraint(pParse, X, &Y, 0, 0);
 }
 // A PRIMARY KEY need not have a name, so it is dropped by kind rather than
 // by name.  PRIMARY is an identifier fallback, so "DROP CONSTRAINT PRIMARY"
@@ -1943,7 +1943,7 @@ cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT PRIMARY KEY. {
   sqlite3AlterDropPrimaryKey(pParse, X);
 }
 cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) DROP NOT NULL. {
-  sqlite3AlterDropConstraint(pParse, X, 0, &Y);
+  sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_notnull");
 }
 cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) SET NOT(Z) NULL onconf. {
   sqlite3AlterSetNotNull(pParse, X, &Y, &Z);

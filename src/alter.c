@@ -3242,10 +3242,11 @@ static Table *alterFindTable(
 ** One of pCons and pCol must be NULL and the other non-null.
 */
 void sqlite3AlterDropConstraint(
-  Parse *pParse,    /* Parsing context */
-  SrcList *pSrc,    /* The table being altered */
-  Token *pCons,     /* Name of the constraint to drop */
-  Token *pCol       /* Name of the column from which to remove the NOT NULL */
+  Parse *pParse,     /* Parsing context */
+  SrcList *pSrc,     /* The table being altered */
+  Token *pCons,      /* Name of the constraint to drop, or 0 */
+  Token *pCol,       /* Name of the column to take constraints off, or 0 */
+  const char *zFunc  /* Editor for form (2), naming which kind goes */
 ){
   sqlite3 *db = pParse->db;
   Table *pTab = 0;
@@ -3254,6 +3255,7 @@ void sqlite3AlterDropConstraint(
   char *zArg = 0;
 
   assert( (pCol==0)!=(pCons==0) );
+  assert( (pCol==0)==(zFunc==0) );
   assert( pSrc->nSrc==1 );
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, pCons!=0, 2);
   if( !pTab ) return;
@@ -3271,7 +3273,7 @@ void sqlite3AlterDropConstraint(
     if( alterFindCol(pParse, pTab, pCol, &iCol) ) return;
     zCol = sqlite3NameFromToken(db, pCol);
     if( zCol==0 ) return;
-    zArg = sqlite3MPrintf(db, "sqlite_drop_notnull(%d, sql, %Q)", iDb, zCol);
+    zArg = sqlite3MPrintf(db, "%s(%d, sql, %Q)", zFunc, iDb, zCol);
     sqlite3DbFree(db, zCol);
   }
 
