@@ -1557,6 +1557,8 @@ void sqlite3AddColumn(Parse *pParse, Token sName, Token sType){
   u8 eType = COLTYPE_CUSTOM;
   u8 szEst = 1;
   char affinity = SQLITE_AFF_BLOB;
+  const char *zColEnd = 0;  /* Where a constraint can be spliced into this
+                            ** column definition.  IN_RENAME_OBJECT only. */
 
   if( (p = pParse->pNewTable)==0 ) return;
   if( p->nCol+1>db->aLimit[SQLITE_LIMIT_COLUMN] ){
@@ -1580,6 +1582,10 @@ void sqlite3AddColumn(Parse *pParse, Token sName, Token sType){
       sType.n -= 9;
       while( sType.n>0 && sqlite3Isspace(sType.z[sType.n-1]) ) sType.n--;
     }
+  }
+
+  if( IN_RENAME_OBJECT ){
+    zColEnd = sType.n>0 ? &sType.z[sType.n] : &sName.z[sName.n];
   }
 
   /* Check for standard typenames.  For standard typenames we will
@@ -1650,6 +1656,10 @@ void sqlite3AddColumn(Parse *pParse, Token sName, Token sType){
   }
   p->nCol++;
   p->nNVCol++;
+  if( zColEnd ){
+    assert( IN_RENAME_OBJECT );
+    sqlite3ParseLocAdd(pParse, PARSELOC_ColDef, p->nCol-1, zColEnd, zColEnd);
+  }
   assert( pParse->isCreate );
   pParse->u1.cr.constraintName.n = 0;
   pParse->u1.cr.zConsKw = 0;
@@ -3072,6 +3082,9 @@ void sqlite3EndTable(
       pCons = pEnd;
     }
     p->u.tab.addColOffset = 13 + (int)(pCons->z - pParse->sNameToken.z);
+    if( IN_RENAME_OBJECT ){
+      pParse->zConsIns = pEnd->z;
+    }
   }
 #endif
 }
