@@ -3427,6 +3427,17 @@ void sqlite3AlterAddConstraint(
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
 }
 
+/*
+** Common tail shared by every ALTER TABLE ... ADD CONSTRAINT form.
+**
+** Reject a name another constraint on this table already carries, splice
+** zCons into the stored CREATE TABLE statement, and reload the schema.
+** iCol<0 stores it as a table-constraint; otherwise it becomes a
+** constraint on that column.
+**
+** The text stored is the text the user wrote.  Nothing is regenerated from
+** the parse tree, so a constraint reads back the way it was typed.
+*/
 static void alterAddConstraintText(
   Parse *pParse,        /* Parse context */
   Table *pTab,          /* Table being altered */
@@ -3455,6 +3466,18 @@ static void alterAddConstraintText(
   renameReloadSchema(pParse, iDb, INITFLAG_AlterAddCons);
 }
 
+/*
+** Count the automatic indexes on pTab - the ones a PRIMARY KEY or UNIQUE
+** constraint in the table's own definition brought into being, as opposed
+** to the ones CREATE INDEX made.
+**
+** This is how the name of the index for a new UNIQUE or PRIMARY KEY
+** constraint is worked out ahead of time.  sqlite3CreateIndex() names an
+** automatic index "sqlite_autoindex_<table>_<n>" where n counts the indexes
+** already on the table.  When the edited statement is reparsed only the
+** automatic ones exist at that point, and the new constraint is last in the
+** list, so its n is this count plus one.
+*/
 static int alterCountAutoIndex(Table *pTab){
   Index *pIdx;
   int n = 0;
@@ -3464,6 +3487,14 @@ static int alterCountAutoIndex(Table *pTab){
   return n;
 }
 
+/*
+** True if a PRIMARY KEY over pList would turn a column of pTab into an
+** alias for the rowid, which is the one form of PRIMARY KEY that changes
+** how rows are stored rather than adding an index beside them.  The test
+** mirrors the one in sqlite3AddPrimaryKey().
+**
+** If it would, *pzCol is set to the name of that column.
+*/
 static int alterPkIsRowidAlias(Table *pTab, ExprList *pList, const char **pzCol){
   Expr *pExpr;
   int iCol;
@@ -3483,6 +3514,31 @@ static int alterPkIsRowidAlias(Table *pTab, ExprList *pList, const char **pzCol)
   return 1;
 }
 
+/*
+** Implement:
+**
+**     ALTER TABLE <table> ADD CONSTRAINT <name> UNIQUE(...)
+**     ALTER TABLE <table> ADD CONSTRAINT <name> PRIMARY KEY(...)
+**     ALTER TABLE <table> ADD CONSTRAINT <name> FOREIGN KEY(...) REFERENCES ...
+**
+** pFirst is the CONSTRAINT keyword; the constraint runs from there to the
+** end of the statement.  pList and zCols/nCols are the indexed column list,
+** as a parse tree and as text; both are 0 for a FOREIGN KEY.  Ownership of
+** pList passes to this routine.
+**
+** A UNIQUE or PRIMARY KEY constraint is not text alone: it needs the b-tree
+** of an automatic index to go with it.  That is built here by a nested
+** CREATE UNIQUE INDEX under the name the reparse will look for.  Building
+** it is also what vets the rows already in the table - if two of them
+** collide the index build fails and takes the whole statement with it.
+** Afterwards the index's own sql is set to NULL, which is how the schema
+** records an index that belongs to a constraint rather than to a CREATE
+** INDEX of its own.
+**
+** A FOREIGN KEY is text alone.  Its rows are checked only when foreign keys
+** are being enforced, which is the same rule that decides whether an INSERT
+** would check them.
+*/
 void sqlite3AlterAddNamedConstraint(
   Parse *pParse,        /* Parse context */
   SrcList *pSrc,        /* Table to add the constraint to */
@@ -3515,6 +3571,9 @@ void sqlite3AlterAddNamedConstraint(
                       pTab->zName);
       goto add_named_cons_exit;
     }
+    /* An INTEGER PRIMARY KEY is the rowid rather than an index over it, so
+    ** adding one would have to rewrite every row.  Refuse rather than
+    ** quietly produce a table whose rowids do not match the column. */
     if( alterPkIsRowidAlias(pTab, pList, &zCol) ){
       sqlite3ErrorMsg(pParse,
           "cannot add an INTEGER PRIMARY KEY to table \"%s\": column \"%s\" "
@@ -3532,6 +3591,8 @@ void sqlite3AlterAddNamedConstraint(
   if( eType==ALTERCONS_ForeignKey ){
     alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, -1);
 
+    /* Emitted after the reload above, so that foreign_key_check sees the
+    ** key that was just added. */
     if( db->flags & SQLITE_ForeignKeys ){
       pParse->colNamesSet = 1;
       sqlite3NestedParse(pParse,
@@ -3545,6 +3606,11 @@ void sqlite3AlterAddNamedConstraint(
                                 pTab->zName, alterCountAutoIndex(pTab)+1);
     if( zIdx==0 ) goto add_named_cons_exit;
 
+    /* A PRIMARY KEY on a STRICT table implies NOT NULL on every column of
+    ** the key, which sqlite3EndTable() adds when the edited statement is
+    ** reparsed.  Nothing rechecks the rows at that point, so check them
+    ** here.  A rowid table that is not STRICT allows NULLs in a PRIMARY
+    ** KEY, so there is nothing to check for it. */
     if( eType==ALTERCONS_PrimaryKey && (pTab->tabFlags & TF_Strict)!=0 ){
       sqlite3NestedParse(pParse,
           "SELECT sqlite_fail('PRIMARY KEY %q on %q would be NULL', %d) "
@@ -3553,6 +3619,10 @@ void sqlite3AlterAddNamedConstraint(
       );
     }
 
+    /* Build the index.  This runs before the statement text is edited, so
+    ** it sees the table as it is now; the reparse afterwards finds the
+    ** b-tree already in place under the name it derives for the new
+    ** constraint. */
     sqlite3NestedParse(pParse,
         "CREATE UNIQUE INDEX \"%w\".\"%w\" ON \"%w\"(%.*s)",
         zDb, zIdx, pTab->zName, nCols, zCols
@@ -3572,6 +3642,19 @@ add_named_cons_exit:
   sqlite3DbFree(db, zName);
 }
 
+/*
+** Implement:
+**
+**     ALTER TABLE <table> ADD CONSTRAINT <name> (<column>) DEFAULT <value>
+**
+** DEFAULT is the one constraint this command understands that cannot be a
+** table-constraint, so this form names the column it belongs to.  pExpr
+** with zStart/zEnd is the default value as parsed and as written, the same
+** pair sqlite3AddDefaultValue() is handed in a CREATE TABLE.
+**
+** No row is touched.  A DEFAULT says what to store when an INSERT does not
+** mention the column, so rows already in the table are unaffected.
+*/
 void sqlite3AlterAddDefault(
   Parse *pParse,        /* Parse context */
   SrcList *pSrc,        /* Table to add the constraint to */
@@ -3606,6 +3689,9 @@ void sqlite3AlterAddDefault(
     sqlite3ErrorMsg(pParse, "cannot use DEFAULT on a generated column");
     goto add_default_exit;
   }
+  /* A column carries at most one DEFAULT.  The expression list is where a
+  ** GENERATED expression lives too, but a generated column was rejected
+  ** just above, so anything found here is a default value. */
   if( sqlite3ColumnExpr(pTab, pTabCol)!=0 ){
     sqlite3ErrorMsg(pParse, "column \"%s\" already has a default value",
                     pTabCol->zCnName);
@@ -3615,6 +3701,9 @@ void sqlite3AlterAddDefault(
   if( db->xAuth ) sqlite3FuncAuth(pParse, pExpr);
 #endif
 
+  /* The "(<column>)" in the middle is addressed to this command and is not
+  ** part of the constraint, so the text to store is put together from the
+  ** name and the value rather than copied whole. */
   zName = sqlite3NameFromToken(db, pName);
   if( zName==0 ) goto add_default_exit;
   zCons = sqlite3MPrintf(db, "CONSTRAINT %.*s DEFAULT %.*s",

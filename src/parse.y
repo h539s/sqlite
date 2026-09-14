@@ -1926,6 +1926,20 @@ cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) LP(A) expr(E) RP(B) onconf. {
   sqlite3AlterAddConstraint(pParse, X, &Y, 0, A.z+1, (B.z-A.z-1), E);
 }
 
+// ALTER TABLE ... ADD CONSTRAINT <name> <constraint>
+//
+// Unlike CREATE TABLE, the name is required.  A constraint added this way
+// can only be taken off again by name, so one added without a name would be
+// there for good.
+//
+// Every form but DEFAULT adds a constraint to the table.  DEFAULT is not a
+// table-constraint in any dialect - it belongs to one column - so that form
+// names the column it applies to.  The parsed constraint is thrown away
+// after parsing: what gets stored is the text the user wrote, and it is
+// located, not searched for.  Parsing it here is what turns a malformed
+// constraint into a syntax error now rather than a schema that will not
+// reload later.
+//
 cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N)
         UNIQUE LP(A) sortlist(L) RP(B) onconf. {
   sqlite3AlterAddNamedConstraint(pParse, X, &K, &N, ALTERCONS_Unique,
@@ -1953,12 +1967,19 @@ cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N)
                                  0, 0, 0);
 }
 
+// The DEFAULT form.  These mirror the five "ccons ::= DEFAULT ..." rules so
+// that exactly the same expressions are accepted here as in a CREATE TABLE,
+// and each hands over the same (expression, text extent) pair that
+// sqlite3AddDefaultValue() is given there.
+//
 cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
         DEFAULT scantok(A) term(E). {
   sqlite3AlterAddDefault(pParse, X, &K, &N, &C, E, A.z, &A.z[A.n]);
 }
 cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
         DEFAULT LP(A) expr(E) RP(Z). {
+  /* Unlike the CREATE TABLE rule this keeps the parentheses: the text is
+  ** stored as a constraint of its own, and "DEFAULT 2+3" does not parse. */
   sqlite3AlterAddDefault(pParse, X, &K, &N, &C, E, A.z, &Z.z[Z.n]);
 }
 cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
