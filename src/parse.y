@@ -384,7 +384,9 @@ scantok(A) ::= . {
 // "carglist" is a list of additional constraints that come after the
 // column name and column type in a CREATE TABLE statement.
 //
-carglist ::= carglist ccons.
+carglist ::= carglist ccons.  {
+  if( IN_RENAME_OBJECT ) sqlite3ColDefLocExtend(pParse);
+}
 carglist ::= .
 ccons ::= CONSTRAINT(C) nm(X). {
   ASSERT_IS_CREATE;
