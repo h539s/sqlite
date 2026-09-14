@@ -3086,6 +3086,10 @@ void sqlite3EndTable(
 #ifndef SQLITE_OMIT_ALTERTABLE
   if( !pSelect && IsOrdinaryTable(p) ){
     assert( pCons && pEnd );
+    if( IN_RENAME_OBJECT ){
+      pParse->zTabOpt = &pEnd->z[pEnd->n];
+    }
+
     if( pCons->z==0 ){
       pCons = pEnd;
     }

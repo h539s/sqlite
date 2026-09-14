@@ -4097,6 +4097,64 @@ static void setStrictFunc(
   sqlite3_result_text(ctx, zNew, -1, SQLITE_DYNAMIC);
 }
 
+static void unsetStrictFunc(
+  sqlite3_context *ctx,
+  int NotUsed,
+  sqlite3_value **argv
+){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  int iSchema = sqlite3_value_int(argv[0]);
+  const char *zSql = (const char*)sqlite3_value_text(argv[1]);
+  const char *zDb;
+  Table *pTab;
+  Parse sParse;
+  char *zNew;
+  int nKeep;
+  int rc;
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  sqlite3_xauth xAuth = db->xAuth;
+  db->xAuth = 0;
+#endif
+
+  UNUSED_PARAMETER(NotUsed);
+  if( zSql==0 || iSchema<0 || iSchema>=db->nDb ){
+    rc = SQLITE_OK;
+    goto unset_strict_done;
+  }
+  zDb = db->aDb[iSchema].zDbSName;
+
+  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
+  if( rc!=SQLITE_OK ) goto unset_strict_cleanup;
+  pTab = sParse.pNewTable;
+  if( pTab==0 || !IsOrdinaryTable(pTab) || sParse.zTabOpt==0 ){
+    rc = SQLITE_CORRUPT_BKPT;
+    goto unset_strict_cleanup;
+  }
+
+  nKeep = (int)(sParse.zTabOpt - zSql);
+  assert( nKeep>0 && nKeep<=sqlite3Strlen30(zSql) );
+  zNew = sqlite3MPrintf(db, "%.*s%s", nKeep, zSql,
+      (pTab->tabFlags & TF_WithoutRowid)!=0 ? " WITHOUT ROWID" : ""
+  );
+  if( zNew==0 ){
+    rc = SQLITE_NOMEM_BKPT;
+    goto unset_strict_cleanup;
+  }
+  sqlite3_result_text(ctx, zNew, -1, SQLITE_TRANSIENT);
+  sqlite3DbFree(db, zNew);
+
+unset_strict_cleanup:
+  renameParseCleanup(&sParse);
+
+unset_strict_done:
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  db->xAuth = xAuth;
+#endif
+  if( rc!=SQLITE_OK ){
+    sqlite3_result_error_code(ctx, rc);
+  }
+}
+
 /*
 ** Generate bytecode to implement:
 **
@@ -4129,7 +4187,8 @@ static void setStrictFunc(
 void sqlite3AlterSetTableOption(
   Parse *pParse,    /* Parsing context */
   SrcList *pSrc,    /* The table being altered */
-  Token *pOpt       /* Name of the table-option being turned on */
+  Token *pOpt,      /* Name of the table-option being set */
+  int bOn           /* True to turn it on, false to turn it off */
 ){
   Table *pTab = 0;
   int iDb = 0;
@@ -4137,6 +4196,11 @@ void sqlite3AlterSetTableOption(
   int ii;
 
   assert( pSrc->nSrc==1 );
+  if( bOn<0 ){
+    sqlite3SrcListDelete(pParse->db, pSrc);
+    return;
+  }
+
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 3);
   if( !pTab ) return;
 
@@ -4147,34 +4211,47 @@ void sqlite3AlterSetTableOption(
 
   /* Turning STRICT on when it is already on changes nothing. */
   if( pTab->tabFlags & TF_Strict ) return;
+  if( ((pTab->tabFlags & TF_Strict)!=0)==(bOn!=0) ) return;
 
   /* (1) Reject custom datatypes up front. */
   assert( IsOrdinaryTable(pTab) );
-  for(ii=0; ii<pTab->nCol; ii++){
-    Column *pCol = &pTab->aCol[ii];
-    if( pCol->eCType==COLTYPE_CUSTOM ){
-      if( pCol->colFlags & COLFLAG_HASTYPE ){
-        sqlite3ErrorMsg(pParse, "unknown datatype for %s.%s: \"%s\"",
-            pTab->zName, pCol->zCnName, sqlite3ColumnType(pCol, "")
-        );
-      }else{
-        sqlite3ErrorMsg(pParse, "missing datatype for %s.%s",
-            pTab->zName, pCol->zCnName
-        );
+  if( bOn ){
+    /* (1) Reject custom datatypes up front. */
+    for(ii=0; ii<pTab->nCol; ii++){
+      Column *pCol = &pTab->aCol[ii];
+      if( pCol->eCType==COLTYPE_CUSTOM ){
+        if( pCol->colFlags & COLFLAG_HASTYPE ){
+          sqlite3ErrorMsg(pParse, "unknown datatype for %s.%s: \"%s\"",
+              pTab->zName, pCol->zCnName, sqlite3ColumnType(pCol, "")
+          );
+        }else{
+          sqlite3ErrorMsg(pParse, "missing datatype for %s.%s",
+              pTab->zName, pCol->zCnName
+          );
+        }
+        return;
       }
-      return;
     }
   }
 
   sqlite3MayAbort(pParse);
 
   /* Edit the SQL for the named table. */
-  sqlite3NestedParse(pParse,
-      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_set_strict(sql, %d) "
-      "WHERE type='table' AND name=%Q COLLATE nocase"
-      , zDb, (pTab->tabFlags & TF_WithoutRowid)!=0, pTab->zName
-  );
+  if( bOn ){
+    sqlite3NestedParse(pParse,
+        "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
+        "sql = sqlite_set_strict(sql, %d) "
+        "WHERE type='table' AND name=%Q COLLATE nocase"
+        , zDb, (pTab->tabFlags & TF_WithoutRowid)!=0, pTab->zName
+    );
+  }else{
+    sqlite3NestedParse(pParse,
+        "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
+        "sql = sqlite_unset_strict(%d, sql) "
+        "WHERE type='table' AND name=%Q COLLATE nocase"
+        , zDb, iDb, pTab->zName
+    );
+  }
 
   /* Reload the database schema, so that the checks below run against the
   ** table as it now is. */
@@ -4183,11 +4260,14 @@ void sqlite3AlterSetTableOption(
   /* (2) and (3): search for a row that the new definition rejects. */
   pParse->colNamesSet = 1;
   sqlite3NestedParse(pParse,
-      "SELECT sqlite_fail('cannot set STRICT on %q: ' || quick_check, %d) "
+      "SELECT sqlite_fail('cannot %s STRICT on %q: ' || quick_check, %d) "
       "FROM pragma_quick_check(%Q,%Q) "
       "WHERE quick_check GLOB 'non-* value in*' "
-      "OR quick_check GLOB 'NULL value in*'",
-      pTab->zName, SQLITE_CONSTRAINT, pTab->zName, zDb
+      "OR quick_check GLOB 'NULL value in*' "
+      "OR quick_check GLOB 'TEXT value in*' "
+      "OR quick_check GLOB 'NUMERIC value in*'",
+      bOn ? "set" : "unset", pTab->zName, SQLITE_CONSTRAINT,
+      pTab->zName, zDb
   );
 }
 
@@ -4208,6 +4288,7 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_insert_constraint,4,insertConstraintFunc),
     INTERNAL_FUNCTION(sqlite_find_constraint,2, findConstraintFunc),
     INTERNAL_FUNCTION(sqlite_set_strict,     2, setStrictFunc),
+    INTERNAL_FUNCTION(sqlite_unset_strict,   2, unsetStrictFunc),
   };
   sqlite3InsertBuiltinFuncs(aAlterTableFuncs, ArraySize(aAlterTableFuncs));
 }
