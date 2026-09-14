@@ -2975,11 +2975,23 @@ drop_notnull_done:
 /*
 ** Internal SQL function:
 **
-**     sqlite_add_constraint(SQL, CONSTRAINT-TEXT, ICOL)
+**     sqlite_insert_constraint(ISCHEMA, SQL, CONSTRAINT-TEXT, ICOL)
 **
-** SQL is a CREATE TABLE statement.  Return a modified version of
-** SQL that adds CONSTRAINT-TEXT at the end of the ICOL-th column
-** definition.  (The left-most column defintion is 0.)
+** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
+** copy of it with CONSTRAINT-TEXT spliced in.
+**
+** ICOL<0 adds a table-constraint: the text goes in just before the ")"
+** that closes the column and constraint list, introduced by a comma, so it
+** becomes the last constraint of the table.  Otherwise the text goes into
+** the definition of the ICOL-th column (the left-most column is 0), where
+** it becomes a constraint on that column.
+**
+** Neither position is found by searching.  The statement is reparsed and
+** both come from what the parser recorded during that parse: Parse.zConsIns
+** for the closing ")", and the PARSELOC_ColDef entry for the column.  The
+** only text work left is stepping back over whitespace and comments in
+** front of the ")", which is cosmetic - "a INT )" would otherwise become
+** "a INT , CONSTRAINT ...".
 */
 static void insertConstraintFunc(
   sqlite3_context *ctx,

@@ -1584,6 +1584,14 @@ void sqlite3AddColumn(Parse *pParse, Token sName, Token sType){
     }
   }
 
+  /* Remember where a constraint can be spliced into this column
+  ** definition: immediately after its type, or after its name when no type
+  ** was written.  Both are positions the parser hands over, so nothing has
+  ** to go looking for them in the text later - see ALTER TABLE ... ADD
+  ** CONSTRAINT <name> (<column>) DEFAULT.
+  **
+  ** This has to be taken before the two blocks below, either of which can
+  ** move sType.z or shorten sType.n, and before sName is dequoted. */
   if( IN_RENAME_OBJECT ){
     zColEnd = sType.n>0 ? &sType.z[sType.n] : &sName.z[sName.n];
   }
@@ -3082,6 +3090,10 @@ void sqlite3EndTable(
       pCons = pEnd;
     }
     p->u.tab.addColOffset = 13 + (int)(pCons->z - pParse->sNameToken.z);
+
+    /* Where a new table-constraint is spliced in: the ")" that closes the
+    ** column and constraint list.  A CREATE TABLE ... AS SELECT has no such
+    ** token and leaves this 0. */
     if( IN_RENAME_OBJECT ){
       pParse->zConsIns = pEnd->z;
     }
