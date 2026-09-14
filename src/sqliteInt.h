@@ -5608,6 +5608,8 @@ void sqlite3AlterDropColumn(Parse*, SrcList*, const Token*);
 void sqlite3NotNullLocAdd(Parse*, int, const char*, const char*);
 void sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
+/* Allowed values for the second argument to sqlite3ParseLocAdd().  See the
+** comment on struct ParseLoc in alter.c for what each one records. */
 #define PARSELOC_NotNull  1
 #define PARSELOC_ColDef   2
 const void *sqlite3RenameTokenMap(Parse*, const void*, const Token*);

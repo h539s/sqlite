@@ -734,22 +734,36 @@ struct RenameToken {
 };
 
 /*
-** Each NotNullLoc object records where one NOT NULL constraint lives
-** within the text of the CREATE TABLE statement being parsed.
+** Each ParseLoc object records where one piece of a CREATE TABLE statement
+** lives within the text being parsed.
 **
-** Where a RenameToken anchors on the identity of a parse-tree element,
-** a NotNullLoc anchors on the ordinal of the column that owns the
-** constraint.  It has to: a NOT NULL constraint leaves no addressable
-** object behind - it becomes four bits in Column.notNull - so there is
-** nothing for a RenameToken to point at.  A column index always exists.
+** Where a RenameToken anchors on the identity of a parse-tree element, a
+** ParseLoc anchors on the ordinal of the column it belongs to.  It has to:
+** the things recorded here leave no addressable object behind for a
+** RenameToken to point at - a NOT NULL constraint becomes four bits in
+** Column.notNull, and the end of a column definition is not an object at
+** all.  A column index always exists.
 **
-** Objects are only created while IN_RENAME_OBJECT, which means only
-** during the reparse of a stored schema statement performed by
-** renameParseSql().  The extent t therefore always points into the same
-** string that the caller is about to edit.
+** eType says what was recorded:
 **
-** Created by sqlite3NotNullLocAdd() and consumed by dropNotNullFunc(),
-** both further down in this file.
+**   PARSELOC_NotNull   The extent of a NOT NULL constraint, taken in by
+**                      ALTER TABLE ... DROP NOT NULL.  A column can carry
+**                      more than one, so there can be several entries with
+**                      the same iCol.
+**
+**   PARSELOC_ColDef    An insertion point inside a column definition: the
+**                      first byte past the column's type, or past its name
+**                      when the type was omitted.  Anything spliced in
+**                      there becomes a constraint on that column.  Exactly
+**                      one entry per column.
+**
+** Objects are only created while IN_RENAME_OBJECT, which means only during
+** the reparse of a stored schema statement performed by renameParseSql().
+** The extent t therefore always points into the same string that the
+** caller is about to edit.
+**
+** Created by sqlite3ParseLocAdd() and consumed by dropNotNullFunc() and
+** insertConstraintFunc(), all further down in this file.
 */
 struct ParseLoc {
   u8 eType;              /* One of the PARSELOC_* values */
@@ -2528,7 +2542,8 @@ void sqlite3NotNullLocAdd(
     }
   }
 
-  /* Extend to the right as far as the parser's lookahead allows. */
+  /* Extend to the right as far as the parser's lookahead allows, then pull
+  ** back to the last real token. */
   zLimit = pParse->sLastToken.z;
   if( zLimit==0 || zLimit<zEnd ) zLimit = zEnd;
   zEnd = &zStart[notNullRtrim(zStart, zLimit)];
@@ -2536,6 +2551,14 @@ void sqlite3NotNullLocAdd(
   sqlite3ParseLocAdd(pParse, PARSELOC_NotNull, iCol, zStart, zEnd);
 }
 
+/*
+** Record one position within the text being parsed.  See the comment on
+** struct ParseLoc for what the eType values mean.  zEnd may equal zStart,
+** which records a bare position rather than an extent.
+**
+** Only ever called while IN_RENAME_OBJECT, so the recorded pointers are
+** into the stored statement that the caller is about to edit.
+*/
 void sqlite3ParseLocAdd(
   Parse *pParse,        /* Parsing context */
   u8 eType,             /* PARSELOC_NotNull or PARSELOC_ColDef */
@@ -2559,7 +2582,7 @@ void sqlite3ParseLocAdd(
 }
 
 /*
-** Free a list of NotNullLoc objects.
+** Free a list of ParseLoc objects.
 */
 void sqlite3ParseLocFree(sqlite3 *db, ParseLoc *pLoc){
   while( pLoc ){
