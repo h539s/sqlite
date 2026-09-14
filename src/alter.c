@@ -4261,6 +4261,92 @@ static char *alterQueryText(sqlite3 *db, int *pRc, char *zSql){
 }
 
 /*
+** Return a copy of the CREATE statement zSql with the name of the object
+** it creates qualified with schema zDb.  The caller frees the result.
+**
+** Nothing else can steer a nested CREATE into a schema other than "main".
+** sqlite3RunVacuum() gets away with setting db->init.iDb because VACUUM
+** also sets DBFLAG_Vacuum, which is what lets sqlite3TwoPartName() accept
+** that state; a rebuild has no such licence, so it names the schema in the
+** statement text instead.
+**
+** The text held in sqlite_schema is always a plain unqualified CREATE:
+** sqlite3EndTable(), sqlite3CreateIndex() and sqlite3BeginTrigger() each
+** normalise away both the TEMP keyword and any schema prefix the user
+** wrote.  So the name is simply the first token after TABLE, INDEX or
+** TRIGGER, skipping an IF NOT EXISTS if a complete one is present.  A
+** partial match is a name that happens to be spelled "if".
+*/
+static char *alterQualifyDdl(sqlite3 *db, const char *zDb, const char *zSql){
+  static const u8 aPhrase[] = { TK_IF, TK_NOT, TK_EXISTS };
+  const unsigned char *z = (const unsigned char*)zSql;
+  int i = 0;            /* Offset of the token being looked at */
+  int iName = -1;       /* Offset the schema prefix is inserted in front of */
+  int iIf = -1;         /* Offset of a partially matched IF NOT EXISTS */
+  int nMatch = 0;       /* 0 before TABLE/INDEX/TRIGGER, then 1 + phrase */
+
+  while( z[i] ){
+    int t;
+    int n = sqlite3GetToken(&z[i], &t);
+    if( t!=TK_SPACE ){
+      if( nMatch==0 ){
+        if( t==TK_TABLE || t==TK_INDEX || t==TK_TRIGGER ) nMatch = 1;
+      }else if( nMatch<4 && t==aPhrase[nMatch-1] ){
+        if( nMatch==1 ) iIf = i;
+        nMatch++;
+      }else{
+        iName = (nMatch<4 && iIf>=0) ? iIf : i;
+        break;
+      }
+    }
+    i += n;
+  }
+  if( iName<0 ) return sqlite3DbStrDup(db, zSql);
+  return sqlite3MPrintf(db, "%.*s\"%w\".%s", iName, zSql, zDb, &zSql[iName]);
+}
+
+/*
+** Run zSql, which is expected to return one column of CREATE statements,
+** and append each one to the NULL-terminated array at *pazRedo, qualified
+** with schema zSchema.  *pnRedo is the number of entries already there and
+** is advanced past the ones added.
+**
+** Takes ownership of zSql, which is freed before returning.
+*/
+static int alterCollectDdl(
+  sqlite3 *db,          /* Database connection */
+  char ***pazRedo,      /* IN/OUT: the array being built */
+  int *pnRedo,          /* IN/OUT: number of entries in it */
+  const char *zSchema,  /* Schema the statements are to be run against */
+  char *zSql            /* The query to run */
+){
+  sqlite3_stmt *pStmt = 0;
+  int rc;
+
+  if( zSql==0 ) return SQLITE_NOMEM_BKPT;
+  rc = sqlite3_prepare_v2(db, zSql, -1, &pStmt, 0);
+  sqlite3DbFree(db, zSql);
+  if( rc!=SQLITE_OK ) return rc;
+  while( sqlite3_step(pStmt)==SQLITE_ROW ){
+    int n = *pnRedo;
+    char **azNew = sqlite3DbRealloc(db, *pazRedo, (n+2)*sizeof(char*));
+    if( azNew==0 ){ rc = SQLITE_NOMEM_BKPT; break; }
+    *pazRedo = azNew;
+    azNew[n] = alterQualifyDdl(db, zSchema,
+                               (const char*)sqlite3_column_text(pStmt, 0));
+    if( azNew[n]==0 ){ rc = SQLITE_NOMEM_BKPT; break; }
+    azNew[n+1] = 0;
+    *pnRedo = n+1;
+  }
+  if( rc==SQLITE_OK ){
+    rc = sqlite3_finalize(pStmt);
+  }else{
+    sqlite3_finalize(pStmt);
+  }
+  return rc;
+}
+
+/*
 ** Return a copy of CREATE TABLE statement zSql with its table-option list
 ** replaced by the one implied by tabFlags, and its table name replaced by
 ** zNewName.  The caller frees the result.
@@ -4325,10 +4411,8 @@ int sqlite3RunAlterTabOpt(
   char *zCols = 0;
   char *zOldSql = 0;
   char *zNewSql = 0;
-  sqlite3_stmt *pStmt = 0;
   char **azRedo = 0;    /* DDL of each index and trigger on the table */
   int nRedo = 0;
-  u8 savedInitDb;
   u64 savedFlags;
   int rc = SQLITE_OK;
   int i;
@@ -4345,7 +4429,6 @@ int sqlite3RunAlterTabOpt(
     ** rewriting references in other objects: those already name the table
     ** correctly, since the name is being restored rather than changed. */
     savedFlags = db->flags;
-    savedInitDb = db->init.iDb;
     db->flags |= SQLITE_LegacyAlter;
     rc = alterExecSqlF(db, pzErrMsg, "ALTER TABLE \"%w\".\"%w\" RENAME TO \"%w\"",
                        zDb, zTmp, zTab);
@@ -4370,10 +4453,9 @@ int sqlite3RunAlterTabOpt(
             zDb, az[0], zTab);
         db->flags = f;
       }
+      /* Already schema-qualified by alterCollectDdl(). */
       for(i=1; rc==SQLITE_OK && az[i]; i++){
-        db->init.iDb = (u8)iDb;
         rc = alterExecSql(db, pzErrMsg, az[i]);
-        db->init.iDb = savedInitDb;
       }
       for(i=0; az[i]; i++) sqlite3DbFree(db, az[i]);
       sqlite3DbFree(db, az);
@@ -4423,43 +4505,41 @@ int sqlite3RunAlterTabOpt(
   if( azRedo==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
   nRedo = 1;
 
-  {
-    char *zQ = sqlite3MPrintf(db,
-        "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
-        " WHERE tbl_name=%Q COLLATE nocase AND sql IS NOT NULL"
-        " AND type IN ('index','trigger')", zDb, zTab);
-    if( zQ==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
-    rc = sqlite3_prepare_v2(db, zQ, -1, &pStmt, 0);
-    sqlite3DbFree(db, zQ);
-  }
-  if( rc!=SQLITE_OK ) goto alter_tabopt_err;
-  while( sqlite3_step(pStmt)==SQLITE_ROW ){
-    char **azNew = sqlite3DbRealloc(db, azRedo, (nRedo+2)*sizeof(char*));
-    if( azNew==0 ){ rc = SQLITE_NOMEM_BKPT; break; }
-    azRedo = azNew;
-    azRedo[nRedo] = sqlite3DbStrDup(db,
-        (const char*)sqlite3_column_text(pStmt, 0));
-    if( azRedo[nRedo]==0 ){ rc = SQLITE_NOMEM_BKPT; break; }
-    azRedo[++nRedo] = 0;
-  }
-  if( rc==SQLITE_OK ) rc = sqlite3_finalize(pStmt); else sqlite3_finalize(pStmt);
-  pStmt = 0;
+  rc = alterCollectDdl(db, &azRedo, &nRedo, zDb, sqlite3MPrintf(db,
+      "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
+      " WHERE tbl_name=%Q COLLATE nocase AND sql IS NOT NULL"
+      " AND type IN ('index','trigger')", zDb, zTab));
   if( rc!=SQLITE_OK ) goto alter_tabopt_err;
 
-  zNewSql = alterRewriteCreate(db, iDb, zOldSql,
-      (bOn ? TF_WithoutRowid : 0) | (pTab->tabFlags & TF_Strict), zTmp);
-  if( zNewSql==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
+  /* A TEMP trigger on a table in another schema is recorded in
+  ** temp.sqlite_schema, so the query above does not see it, but the DROP
+  ** does take it down.  Collect those too - unless TEMP has a table of its
+  ** own by this name, in which case they belong to that one and the DROP
+  ** will leave them alone.  An index cannot be in a different schema from
+  ** its table, so only triggers can turn up here. */
+  if( iDb!=1 && sqlite3FindTable(db, zTab, db->aDb[1].zDbSName)==0 ){
+    rc = alterCollectDdl(db, &azRedo, &nRedo, db->aDb[1].zDbSName,
+      sqlite3MPrintf(db,
+        "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
+        " WHERE tbl_name=%Q COLLATE nocase AND sql IS NOT NULL"
+        " AND type='trigger'", db->aDb[1].zDbSName, zTab));
+    if( rc!=SQLITE_OK ) goto alter_tabopt_err;
+  }
+
+  {
+    char *zTmpSql = alterRewriteCreate(db, iDb, zOldSql,
+        (bOn ? TF_WithoutRowid : 0) | (pTab->tabFlags & TF_Strict), zTmp);
+    if( zTmpSql==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
+    zNewSql = alterQualifyDdl(db, zDb, zTmpSql);
+    sqlite3DbFree(db, zTmpSql);
+    if( zNewSql==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
+  }
 
   azRedo[0] = alterRewriteCreate(db, iDb, zOldSql,
       (bOn ? TF_WithoutRowid : 0) | (pTab->tabFlags & TF_Strict), 0);
   if( azRedo[0]==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
 
-  /* init.iDb steers the CREATE into the right schema, as sqlite3RunVacuum()
-  ** does. */
-  savedInitDb = db->init.iDb;
-  db->init.iDb = (u8)iDb;
   rc = alterExecSql(db, pzErrMsg, zNewSql);
-  db->init.iDb = savedInitDb;
 
   if( rc==SQLITE_OK ){
     rc = alterExecSqlF(db, pzErrMsg,
@@ -4479,7 +4559,6 @@ alter_tabopt_err:
   if( *pzErrMsg==0 ) sqlite3SetString(pzErrMsg, db, sqlite3_errmsg(db));
 
 alter_tabopt_out:
-  if( pStmt ) sqlite3_finalize(pStmt);
   for(i=0; i<nRedo; i++) sqlite3DbFree(db, azRedo[i]);
   sqlite3DbFree(db, azRedo);
   sqlite3DbFree(db, zOldSql);
