@@ -3055,8 +3055,9 @@ drop_notnull_done:
 ** alterColumnIndex().
 **
 ** Neither position is found by searching.  The statement is reparsed and
-** both come from what the parser recorded during that parse: Parse.zConsIns
-** for the closing ")", and the PARSELOC_ColDef entry for the column, whose
+** both come from what the parser recorded during that parse:
+** Parse.sColListEnd for the closing ")", and the PARSELOC_ColDef entry for
+** the column, whose
 ** extent ends where that column's definition does.  No text work is left.
 */
 static void insertConstraintFunc(
@@ -3114,11 +3115,11 @@ static void insertConstraintFunc(
   }
 
   if( iCol<0 ){
-    if( sParse.zConsIns==0 ){
+    if( sParse.sColListEnd.z==0 ){
       rc = SQLITE_CORRUPT_BKPT;
       goto insert_cons_cleanup;
     }
-    iOff = (int)(sParse.zConsIns - zSql);
+    iOff = (int)(sParse.sColListEnd.z - zSql);
     zNew = sqlite3MPrintf(db, "%.*s, %s%s", iOff, zSql, zCons, &zSql[iOff]);
   }else{
     ParseLoc *p;
@@ -4114,9 +4115,9 @@ static void setStrictFunc(
 ** "WITHOUT ROWID, STRICT", "STRICT , without rowid", a comment sitting
 ** between the two - none of which a scan for the STRICT keyword would
 ** handle without also working out which comma belongs to it.  The parser
-** already knows both facts this needs: where the list starts
-** (Parse.zTabOpt, recorded during the reparse) and which options the table
-** ends up with (TF_WithoutRowid).
+** already knows both facts this needs: where the list starts (just past
+** Parse.sColListEnd, recorded during the reparse) and which options the
+** table ends up with (TF_WithoutRowid).
 **
 ** A comment written inside the option list is dropped along with the rest
 ** of the list.  Comments anywhere else in the statement are untouched.
@@ -4150,13 +4151,13 @@ static void unsetStrictFunc(
   rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
   if( rc!=SQLITE_OK ) goto unset_strict_cleanup;
   pTab = sParse.pNewTable;
-  if( pTab==0 || !IsOrdinaryTable(pTab) || sParse.zTabOpt==0 ){
+  if( pTab==0 || !IsOrdinaryTable(pTab) || sParse.sColListEnd.z==0 ){
     /* This can happen if the sqlite_schema table is corrupt */
     rc = SQLITE_CORRUPT_BKPT;
     goto unset_strict_cleanup;
   }
 
-  nKeep = (int)(sParse.zTabOpt - zSql);
+  nKeep = (int)(&sParse.sColListEnd.z[sParse.sColListEnd.n] - zSql);
   assert( nKeep>0 && nKeep<=sqlite3Strlen30(zSql) );
   zNew = sqlite3MPrintf(db, "%.*s%s", nKeep, zSql,
       (pTab->tabFlags & TF_WithoutRowid)!=0 ? " WITHOUT ROWID" : ""
@@ -4351,8 +4352,8 @@ static int alterCollectDdl(
 ** replaced by the one implied by tabFlags, and its table name replaced by
 ** zNewName.  The caller frees the result.
 **
-** Neither edit is a search.  The option list is rebuilt from
-** Parse.zTabOpt, on the same reasoning as sqlite_unset_strict().  The name
+** Neither edit is a search.  The option list is rebuilt from what follows
+** Parse.sColListEnd, on the same reasoning as sqlite_unset_strict().  The name
 ** is located through its RenameToken, which is what sqlite_rename_table()
 ** uses, so a quoted or awkwardly spelled name needs no special handling.
 */
@@ -4368,9 +4369,9 @@ static char *alterRewriteCreate(
   int rc;
 
   rc = renameParseSql(&sParse, db->aDb[iDb].zDbSName, db, zSql, iDb==1);
-  if( rc==SQLITE_OK && sParse.pNewTable!=0 && sParse.zTabOpt!=0 ){
+  if( rc==SQLITE_OK && sParse.pNewTable!=0 && sParse.sColListEnd.z!=0 ){
     RenameToken *pName = renameTokenFind(&sParse, 0, sParse.pNewTable->zName);
-    int nKeep = (int)(sParse.zTabOpt - zSql);
+    int nKeep = (int)(&sParse.sColListEnd.z[sParse.sColListEnd.n] - zSql);
     const char *zWr = (tabFlags & TF_WithoutRowid) ? " WITHOUT ROWID" : "";
     const char *zSep = ((tabFlags & TF_WithoutRowid)
                      && (tabFlags & TF_Strict)) ? "," : "";

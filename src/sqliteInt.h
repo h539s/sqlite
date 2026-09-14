@@ -4055,12 +4055,12 @@ struct Parse {
   RenameToken *pRename;     /* Tokens subject to renaming by ALTER TABLE */
   ParseLoc *pLoc;           /* Positions recorded from the text being parsed.
                             ** Only collected when IN_RENAME_OBJECT. */
-  const char *zConsIns;     /* Where a new table-constraint is spliced in: the
-                            ** ")" closing the column list.  IN_RENAME_OBJECT
-                            ** only, and 0 for a CREATE TABLE ... AS SELECT. */
-  const char *zTabOpt;      /* First byte after the ")" closing the column
-                            ** list of a CREATE TABLE.  Only set when
-                            ** IN_RENAME_OBJECT. */
+  Token sColListEnd;        /* The ")" that closes the column and constraint
+                            ** list of a CREATE TABLE.  Two edits are made
+                            ** relative to it: a new table-constraint goes in
+                            ** just before it, and the table-option list is
+                            ** everything after it.  IN_RENAME_OBJECT only,
+                            ** and z==0 for a CREATE TABLE ... AS SELECT. */
 #endif
 };
 
