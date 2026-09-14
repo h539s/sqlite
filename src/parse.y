@@ -277,6 +277,7 @@ columnname(A) ::= nm(A) typetoken(Y). {sqlite3AddColumn(pParse,A,Y);}
   QUERY KEY OF OFFSET PRAGMA RAISE RECURSIVE RELEASE REPLACE RESTRICT ROW ROWS
   ROLLBACK SAVEPOINT TEMP TRIGGER VACUUM VIEW VIRTUAL WITH WITHOUT
   NULLS FIRST LAST
+  TYPE
 %ifdef SQLITE_OMIT_COMPOUND_SELECT
   EXCEPT INTERSECT UNION
 %endif SQLITE_OMIT_COMPOUND_SELECT
@@ -2004,6 +2005,9 @@ cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(Y) nm(Z) CHECK LP(A) expr(E) RP(B
 }
 cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) LP(A) expr(E) RP(B) onconf. {
   sqlite3AlterAddConstraint(pParse, X, &Y, 0, A.z+1, (B.z-A.z-1), E);
+}
+cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) SET TYPE typetoken(Z). {
+  sqlite3AlterSetColumnType(pParse, X, &Y, &Z);
 }
 cmd ::= ALTER TABLE fullname(X) SET nm(Y) EQ onoff(Z). {
   sqlite3AlterSetTableOption(pParse, X, &Y, Z);

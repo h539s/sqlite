@@ -307,6 +307,7 @@ static Keyword aKeywordTable[] = {
   { "TIES",             "TK_TIES",         WINDOWFUNC,       3      },
   { "TO",               "TK_TO",           ALWAYS,           3      },
   { "TRANSACTION",      "TK_TRANSACTION",  ALWAYS,           1      },
+  { "TYPE",             "TK_TYPE",         ALTER,            1      },
   { "TRIGGER",          "TK_TRIGGER",      TRIGGER,          1      },
   { "UNBOUNDED",        "TK_UNBOUNDED",    WINDOWFUNC,       3      },
   { "UNION",            "TK_UNION",        COMPOUND,         3      },
