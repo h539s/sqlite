@@ -386,7 +386,12 @@ scantok(A) ::= . {
 //
 carglist ::= carglist ccons.
 carglist ::= .
-ccons ::= CONSTRAINT nm(X). {ASSERT_IS_CREATE; pParse->u1.cr.constraintName = X;}
+ccons ::= CONSTRAINT(C) nm(X). {
+  ASSERT_IS_CREATE;
+  pParse->u1.cr.constraintName = X;
+  pParse->u1.cr.zConsKw = C.z;
+  pParse->u1.cr.zConsEnd = &X.z[X.n];
+}
 ccons ::= DEFAULT scantok(A) term(X).
                             {sqlite3AddDefaultValue(pParse,X,A.z,&A.z[A.n]);}
 ccons ::= DEFAULT LP(A) expr(X) RP(Z).
@@ -410,7 +415,8 @@ ccons ::= DEFAULT scantok id(X).       {
 // UNIQUE constraints.
 //
 ccons ::= NULL onconf.
-ccons ::= NOT NULL onconf(R).    {sqlite3AddNotNull(pParse, R);}
+ccons ::= NOT(N) NULL(M) onconf(R).
+                                 {sqlite3AddNotNull(pParse, R, N.z, &M.z[M.n]);}
 ccons ::= PRIMARY KEY sortorder(Z) onconf(R) autoinc(I).
                                  {sqlite3AddPrimaryKey(pParse,0,R,I,Z);}
 ccons ::= UNIQUE onconf(R).      {sqlite3CreateIndex(pParse,0,0,0,0,R,0,0,0,0,
@@ -461,7 +467,8 @@ conslist_opt(A) ::= .                         {A.n = 0; A.z = 0;}
 conslist_opt(A) ::= COMMA(A) conslist.
 conslist ::= conslist tconscomma tcons.
 conslist ::= tcons.
-tconscomma ::= COMMA.          {ASSERT_IS_CREATE; pParse->u1.cr.constraintName.n = 0;}
+tconscomma ::= COMMA.          {ASSERT_IS_CREATE; pParse->u1.cr.constraintName.n = 0;
+                                pParse->u1.cr.zConsKw = 0;}
 tconscomma ::= .
 tcons ::= CONSTRAINT nm(X).    {ASSERT_IS_CREATE; pParse->u1.cr.constraintName = X;}
 tcons ::= PRIMARY KEY LP sortlist(X) autoinc(I) RP onconf(R).

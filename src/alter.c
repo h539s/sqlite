@@ -733,6 +733,12 @@ struct RenameToken {
   RenameToken *pNext;    /* Next is a list of all RenameToken objects */
 };
 
+struct NotNullLoc {
+  int iCol;              /* Index of the column owning this constraint */
+  Token t;               /* Extent of the constraint text */
+  NotNullLoc *pNext;     /* Next constraint on the same parse */
+};
+
 /*
 ** The context of an ALTER TABLE RENAME COLUMN operation that gets passed
 ** down into the Walker.
@@ -1223,8 +1229,13 @@ static int renameParseSql(
   if( rc==SQLITE_OK ){
     int nSql = sqlite3Strlen30(zSql);
     RenameToken *pToken;
+    NotNullLoc *pLoc;
     for(pToken=p->pRename; pToken; pToken=pToken->pNext){
       assert( pToken->t.z>=zSql && &pToken->t.z[pToken->t.n]<=&zSql[nSql] );
+    }
+    for(pLoc=p->pNotNull; pLoc; pLoc=pLoc->pNext){
+      assert( pLoc->t.n>0 );
+      assert( pLoc->t.z>=zSql && &pLoc->t.z[pLoc->t.n]<=&zSql[nSql] );
     }
   }
 #endif
@@ -1528,6 +1539,7 @@ static void renameParseCleanup(Parse *pParse){
   sqlite3DeleteTrigger(db, pParse->pNewTrigger);
   sqlite3DbFree(db, pParse->zErrMsg);
   renameTokenFree(db, pParse->pRename);
+  sqlite3NotNullLocFree(db, pParse->pNotNull);
   sqlite3ParseObjectReset(pParse);
 }
 
@@ -2437,6 +2449,66 @@ static int getWhitespace(const u8 *z){
 
 /*
 ** Argument z points into the body of a constraint - specifically the 
+static int notNullRtrim(const char *zStart, const char *zEnd){
+  int nMax = (int)(zEnd - zStart);
+  int iOff = 0;
+  int nRet = 0;
+
+  while( iOff<nMax ){
+    int t = 0;
+    int n = sqlite3GetToken((const u8*)&zStart[iOff], &t);
+    if( n<=0 || t==TK_ILLEGAL ) break;
+    if( t!=TK_SPACE && t!=TK_COMMENT ) nRet = iOff + n;
+    iOff += n;
+  }
+  return nRet;
+}
+
+void sqlite3NotNullLocAdd(
+  Parse *pParse,        /* Parsing context */
+  int iCol,             /* Index of the column being constrained */
+  const char *zStart,   /* First byte of the "NOT" keyword */
+  const char *zEnd      /* First byte past the "NULL" keyword */
+){
+  NotNullLoc *pNew;
+  const char *zKw;
+  const char *zLimit;
+
+  assert( IN_RENAME_OBJECT );
+  assert( pParse->isCreate );
+  assert( zStart!=0 && zEnd!=0 && zEnd>zStart );
+
+  zKw = pParse->u1.cr.zConsKw;
+  if( zKw!=0 ){
+    const char *zGap = pParse->u1.cr.zConsEnd;
+    assert( zGap!=0 );
+    if( zGap<=zStart
+     && &zGap[getWhitespace((const u8*)zGap)]==zStart
+    ){
+      zStart = zKw;
+    }
+  }
+
+  zLimit = pParse->sLastToken.z;
+  if( zLimit==0 || zLimit<zEnd ) zLimit = zEnd;
+
+  pNew = sqlite3DbMallocZero(pParse->db, sizeof(NotNullLoc));
+  if( pNew==0 ) return;
+  pNew->iCol = iCol;
+  pNew->t.z = zStart;
+  pNew->t.n = (unsigned)notNullRtrim(zStart, zLimit);
+  pNew->pNext = pParse->pNotNull;
+  pParse->pNotNull = pNew;
+}
+
+void sqlite3NotNullLocFree(sqlite3 *db, NotNullLoc *pLoc){
+  while( pLoc ){
+    NotNullLoc *pNext = pLoc->pNext;
+    sqlite3DbFree(db, pLoc);
+    pLoc = pNext;
+  }
+}
+
 ** second token of the constraint definition.  For a named constraint,
 ** z points to the second token of the constraint definition. For an 
 ** unnamed NOT NULL constraint, z points to the first byte past the NOT 
@@ -2693,6 +2765,95 @@ static void dropConstraintFunc(
   }
 }
 
+static void dropNotNullFunc(
+  sqlite3_context *ctx,
+  int NotUsed,
+  sqlite3_value **argv
+){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  int iSchema = sqlite3_value_int(argv[0]);
+  const char *zSql = (const char*)sqlite3_value_text(argv[1]);
+  int iCol = sqlite3_value_int(argv[2]);
+  const char *zDb;
+  Table *pTab;
+  Parse sParse;
+  char *zOut = 0;
+  int nOut = 0;
+  int rc;
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  sqlite3_xauth xAuth = db->xAuth;
+  db->xAuth = 0;
+#endif
+
+  UNUSED_PARAMETER(NotUsed);
+  if( zSql==0 || iCol<0 || iSchema<0 || iSchema>=db->nDb ){
+    rc = SQLITE_OK;
+    goto drop_notnull_done;
+  }
+  zDb = db->aDb[iSchema].zDbSName;
+
+  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
+  if( rc!=SQLITE_OK ) goto drop_notnull_cleanup;
+  pTab = sParse.pNewTable;
+  if( pTab==0 || iCol>=pTab->nCol ){
+    /* This can happen if the sqlite_schema table is corrupt */
+    rc = SQLITE_CORRUPT_BKPT;
+    goto drop_notnull_cleanup;
+  }
+
+  nOut = sqlite3Strlen30(zSql);
+  zOut = sqlite3DbMallocRaw(db, (i64)nOut+1);
+  if( zOut==0 ){
+    rc = SQLITE_NOMEM_BKPT;
+    goto drop_notnull_cleanup;
+  }
+  memcpy(zOut, zSql, (size_t)nOut+1);
+
+  while( 1 ){
+    NotNullLoc *p;
+    NotNullLoc *pBest = 0;
+    int iStart, iEnd;
+    int t = 0;
+
+    for(p=sParse.pNotNull; p; p=p->pNext){
+      if( p->iCol!=iCol ) continue;
+      if( pBest==0 || p->t.z>pBest->t.z ) pBest = p;
+    }
+    if( pBest==0 ) break;
+    pBest->iCol = -1;
+
+    iStart = (int)(pBest->t.z - zSql);
+    iEnd = iStart + (int)pBest->t.n;
+    assert( iStart>=0 && iEnd<=nOut );
+
+    iEnd += getWhitespace((const u8*)&zOut[iEnd]);
+    sqlite3GetToken((const u8*)&zOut[iEnd], &t);
+    while( iStart>0 && sqlite3Isspace(zOut[iStart-1]) ) iStart--;
+    if( t!=TK_RP && t!=TK_COMMA ){
+      zOut[iStart] = ' ';
+      iStart++;
+    }
+    assert( iStart<=iEnd );
+
+    memmove(&zOut[iStart], &zOut[iEnd], (size_t)(nOut-iEnd)+1);
+    nOut -= (iEnd - iStart);
+  }
+
+  sqlite3_result_text(ctx, zOut, nOut, SQLITE_TRANSIENT);
+
+drop_notnull_cleanup:
+  renameParseCleanup(&sParse);
+  sqlite3DbFree(db, zOut);
+
+drop_notnull_done:
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  db->xAuth = xAuth;
+#endif
+  if( rc!=SQLITE_OK ){
+    sqlite3_result_error_code(ctx, rc);
+  }
+}
+
 /*
 ** Internal SQL function:
 **
@@ -2847,18 +3008,18 @@ void sqlite3AlterDropConstraint(
 
   if( pCons ){
     char *z = sqlite3NameFromToken(db, pCons);
-    zArg = sqlite3MPrintf(db, "%Q", z);
+    zArg = sqlite3MPrintf(db, "sqlite_drop_constraint(sql, %Q)", z);
     sqlite3DbFree(db, z);
   }else{
     int iCol;
     if( alterFindCol(pParse, pTab, pCol, &iCol) ) return;
-    zArg = sqlite3MPrintf(db, "%d", iCol);
+    zArg = sqlite3MPrintf(db, "sqlite_drop_notnull(%d, sql, %d)", iDb, iCol);
   }
 
   /* Edit the SQL for the named table. */
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_drop_constraint(sql, %s) "
+      "sql = %s "
       "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
       , zDb, zArg, pTab->zName
   );
@@ -2965,9 +3126,10 @@ void sqlite3AlterSetNotNull(
   /* Edit the SQL for the named table. */
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_add_constraint(sqlite_drop_constraint(sql, %d), %.*Q, %d) "
+      "sql = sqlite_add_constraint("
+              "sqlite_drop_notnull(%d, sql, %d), %.*Q, %d) "
       "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iCol, nCons, pCons, iCol, pTab->zName
+      , zDb, iDb, iCol, nCons, pCons, iCol, pTab->zName
   );
 
   /* Finally, reload the database schema. */
@@ -3109,6 +3271,7 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_drop_column,    3, dropColumnFunc),
     INTERNAL_FUNCTION(sqlite_rename_quotefix,2, renameQuotefixFunc),
     INTERNAL_FUNCTION(sqlite_drop_constraint,2, dropConstraintFunc),
+    INTERNAL_FUNCTION(sqlite_drop_notnull,   3, dropNotNullFunc),
     INTERNAL_FUNCTION(sqlite_fail,           2, failConstraintFunc),
     INTERNAL_FUNCTION(sqlite_add_constraint, 3, addConstraintFunc),
     INTERNAL_FUNCTION(sqlite_find_constraint,2, findConstraintFunc),
