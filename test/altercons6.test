@@ -1,0 +1,410 @@
+# 2026 September 13
+#
+# The author disclaims copyright to this source code.  In place of
+# a legal notice, here is a blessing:
+#
+#    May you do good and not evil.
+#    May you find forgiveness for yourself and forgive others.
+#    May you share freely, never taking more than you give.
+#
+#*************************************************************************
+#
+# Tests for ALTER TABLE <table> DROP CONSTRAINT PRIMARY KEY.
+#
+# A PRIMARY KEY need not be named, so it is dropped by kind rather than by
+# name.  On a rowid table it is a clause in the stored statement plus an
+# automatic index beside the rows, and both go.  No row is rewritten: the
+# record layout of a rowid table does not depend on which of its columns
+# the PRIMARY KEY names.
+#
+# Two shapes are refused rather than half-done - a WITHOUT ROWID table,
+# whose rows are kept in PRIMARY KEY order, and an INTEGER PRIMARY KEY,
+# whose values live in the rowid and not in the record.
+#
+# The clause is cut out at the extent the parser recorded during the
+# reparse (PARSELOC_PrimaryKey), so the column form and the table form are
+# removed by the same code and an ON CONFLICT clause or a sort order goes
+# with the clause without being searched for.
+#
+
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+set testprefix altercons6
+
+# If SQLITE_OMIT_ALTERTABLE is defined, omit this file.
+ifcapable !altertable {
+  finish_test
+  return
+}
+
+#-------------------------------------------------------------------------
+# 1.*: what is left in the stored statement.  Whatever the clause carries
+# - a name, a sort order, an ON CONFLICT - leaves with it, and nothing
+# else does.
+#
+foreach {tn before after} {
+  1 { CREATE TABLE t1(a TEXT PRIMARY KEY, b) }
+    { CREATE TABLE t1(a TEXT, b) }
+
+  2 { CREATE TABLE t1(a TEXT, b, PRIMARY KEY(a)) }
+    { CREATE TABLE t1(a TEXT, b) }
+
+  3 { CREATE TABLE t1(a TEXT CONSTRAINT k PRIMARY KEY, b) }
+    { CREATE TABLE t1(a TEXT, b) }
+
+  4 { CREATE TABLE t1(a TEXT, b, CONSTRAINT k PRIMARY KEY(a)) }
+    { CREATE TABLE t1(a TEXT, b) }
+
+  5 { CREATE TABLE t1(a TEXT, b, CONSTRAINT k PRIMARY KEY(a), CHECK(b IS NOT 9)) }
+    { CREATE TABLE t1(a TEXT, b, CHECK(b IS NOT 9)) }
+
+  6 { CREATE TABLE t1(a TEXT PRIMARY KEY ON CONFLICT FAIL NOT NULL, b) }
+    { CREATE TABLE t1(a TEXT NOT NULL, b) }
+
+  7 { CREATE TABLE t1(a TEXT PRIMARY KEY DESC, b) }
+    { CREATE TABLE t1(a TEXT, b) }
+
+  8 { CREATE TABLE t1(a, b, PRIMARY KEY(a DESC)) }
+    { CREATE TABLE t1(a, b) }
+
+  9 { CREATE TABLE t1(a REAL, b TEXT, c INT, PRIMARY KEY(a,b), UNIQUE(b)) }
+    { CREATE TABLE t1(a REAL, b TEXT, c INT, UNIQUE(b)) }
+
+  10 { CREATE TABLE t1(a, b, UNIQUE(b), PRIMARY KEY(a)) }
+     { CREATE TABLE t1(a, b, UNIQUE(b)) }
+
+  11 { CREATE TABLE t1(a TEXT PRIMARY KEY /* the key */, b) }
+     { CREATE TABLE t1(a TEXT, b) }
+
+  12 { CREATE TABLE t1("primary key" TEXT PRIMARY KEY, b) }
+     { CREATE TABLE t1("primary key" TEXT, b) }
+
+  13 { CREATE TABLE t1(a TEXT, b, PRIMARY KEY(a) ON CONFLICT REPLACE) }
+     { CREATE TABLE t1(a TEXT, b) }
+
+  14 { CREATE TABLE t1(a TEXT PRIMARY KEY) }
+     { CREATE TABLE t1(a TEXT) }
+} {
+  reset_db
+  do_execsql_test 1.$tn.1 $before
+  do_execsql_test 1.$tn.2 {
+    ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+    SELECT sql FROM sqlite_schema WHERE name='t1';
+  } [list [string trim $after]]
+  do_execsql_test 1.$tn.3 { PRAGMA integrity_check } {ok}
+}
+
+#-------------------------------------------------------------------------
+# 2.*: the result is the table that would have been created without the
+# key - same columns, same indexes under the same names, same flags.
+#
+foreach {tn before after} {
+  1 { CREATE TABLE t1(a TEXT PRIMARY KEY, b, c) }
+    { CREATE TABLE t1(a TEXT, b, c) }
+
+  2 { CREATE TABLE t1(a, b, c, PRIMARY KEY(a), UNIQUE(b), UNIQUE(c)) }
+    { CREATE TABLE t1(a, b, c, UNIQUE(b), UNIQUE(c)) }
+
+  3 { CREATE TABLE t1(a, b UNIQUE, c, PRIMARY KEY(a,c)) }
+    { CREATE TABLE t1(a, b UNIQUE, c) }
+
+  4 { CREATE TABLE t1(a, b, c UNIQUE, PRIMARY KEY(a), UNIQUE(b)) }
+    { CREATE TABLE t1(a, b, c UNIQUE, UNIQUE(b)) }
+} {
+  set probe {
+    SELECT cid, name, type, "notnull", coalesce(dflt_value,'~'), pk
+      FROM pragma_table_info('t1');
+    SELECT il.name, il."unique", il.origin, ii.seqno, ii.name
+      FROM pragma_index_list('t1') il, pragma_index_info(il.name) ii
+     ORDER BY il.name, ii.seqno;
+    SELECT wr, strict, ncol FROM pragma_table_list WHERE name='t1';
+  }
+
+  reset_db
+  execsql $after
+  set ref [execsql $probe]
+
+  reset_db
+  execsql $before
+  do_execsql_test 2.$tn.1 "
+    ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+    $probe
+  " $ref
+  do_execsql_test 2.$tn.2 { PRAGMA integrity_check } {ok}
+}
+
+#-------------------------------------------------------------------------
+# 3.*: the rows are not touched.  Nothing is rewritten, so values and
+# storage classes come back exactly as they went in.
+#
+reset_db
+do_execsql_test 3.0 {
+  CREATE TABLE t1(a TEXT PRIMARY KEY, b, c);
+  INSERT INTO t1 VALUES('k', 1, x'aa'), ('j', 2.5, NULL), ('i', NULL, 'z');
+}
+do_execsql_test 3.1 {
+  SELECT typeof(a)||':'||quote(a)||'/'||typeof(b)||':'||quote(b)
+    FROM t1 ORDER BY a;
+} {{text:'i'/null:NULL} {text:'j'/real:2.5} {text:'k'/integer:1}}
+do_execsql_test 3.2 {
+  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  SELECT typeof(a)||':'||quote(a)||'/'||typeof(b)||':'||quote(b)
+    FROM t1 ORDER BY a;
+} {{text:'i'/null:NULL} {text:'j'/real:2.5} {text:'k'/integer:1}}
+do_execsql_test 3.3 { PRAGMA integrity_check } {ok}
+
+# And what the key used to reject is now accepted.
+#
+do_execsql_test 3.4 {
+  INSERT INTO t1 VALUES('k', 9, 9);
+  SELECT count(*) FROM t1 WHERE a='k';
+} {2}
+
+#-------------------------------------------------------------------------
+# 4.*: the automatic index goes with the clause.  An index left behind
+# would be reported as an orphan by the next schema load, so the indexes
+# that outlive the key are renumbered to close the gap.
+#
+reset_db
+do_execsql_test 4.1.0 {
+  CREATE TABLE t1(a, b, c, PRIMARY KEY(a), UNIQUE(b), UNIQUE(c));
+  SELECT name FROM sqlite_schema WHERE type='index' ORDER BY name;
+} {sqlite_autoindex_t1_1 sqlite_autoindex_t1_2 sqlite_autoindex_t1_3}
+do_execsql_test 4.1.1 {
+  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  SELECT name FROM sqlite_schema WHERE type='index' ORDER BY name;
+} {sqlite_autoindex_t1_1 sqlite_autoindex_t1_2}
+do_execsql_test 4.1.2 { PRAGMA integrity_check } {ok}
+
+# The survivors still index the columns they always did.
+#
+do_execsql_test 4.1.3 {
+  SELECT il.name, ii.name FROM pragma_index_list('t1') il,
+         pragma_index_info(il.name) ii ORDER BY il.name;
+} {sqlite_autoindex_t1_1 b sqlite_autoindex_t1_2 c}
+
+# An explicitly created index is not renumbered and not dropped.
+#
+reset_db
+do_execsql_test 4.2.0 {
+  CREATE TABLE t1(a, b, PRIMARY KEY(a));
+  CREATE INDEX i1 ON t1(b);
+  INSERT INTO t1 VALUES(1,2),(3,4);
+}
+do_execsql_test 4.2.1 {
+  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  SELECT type, name FROM sqlite_schema ORDER BY name;
+} {index i1 table t1}
+do_execsql_test 4.2.2 {
+  PRAGMA integrity_check;
+  SELECT b FROM t1 WHERE b=4;
+} {ok 4}
+
+#-------------------------------------------------------------------------
+# 5.*: refusals.  Nothing is changed by one.
+#
+proc pk_refuse {tn setup errmsg} {
+  reset_db
+  execsql $setup
+  set before [execsql {
+    SELECT type, name, coalesce(sql,'~') FROM sqlite_schema ORDER BY name
+  }]
+  do_catchsql_test $tn.1 {
+    ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  } [list 1 $errmsg]
+  do_execsql_test $tn.2 {
+    SELECT type, name, coalesce(sql,'~') FROM sqlite_schema ORDER BY name
+  } $before
+  do_execsql_test $tn.3 { PRAGMA integrity_check } {ok}
+}
+
+# An INTEGER PRIMARY KEY is the rowid.  Its values are not in the record,
+# so a table that lost the clause would read the column back as NULL.
+#
+pk_refuse 5.1 {
+  CREATE TABLE t1(a INTEGER PRIMARY KEY, b);
+  INSERT INTO t1 VALUES(1,2);
+} {cannot drop an INTEGER PRIMARY KEY from table "t1": column "a" holds the rowid}
+
+pk_refuse 5.2 {
+  CREATE TABLE t1(a INTEGER PRIMARY KEY AUTOINCREMENT, b);
+  INSERT INTO t1 VALUES(1,2);
+} {cannot drop an INTEGER PRIMARY KEY from table "t1": column "a" holds the rowid}
+
+pk_refuse 5.3 {
+  CREATE TABLE t1(a INT, b, PRIMARY KEY(a)) WITHOUT ROWID;
+  INSERT INTO t1 VALUES(1,2);
+} {cannot drop the PRIMARY KEY of WITHOUT ROWID table "t1"}
+
+pk_refuse 5.4 {
+  CREATE TABLE t1(a, b);
+  INSERT INTO t1 VALUES(1,2);
+} {table "t1" has no PRIMARY KEY}
+
+# Dropping it twice: the second time there is nothing left to drop.
+#
+pk_refuse 5.5 {
+  CREATE TABLE t1(a TEXT PRIMARY KEY, b);
+  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+} {table "t1" has no PRIMARY KEY}
+
+do_catchsql_test 5.6 {
+  CREATE VIEW v1 AS SELECT 1;
+  ALTER TABLE v1 DROP CONSTRAINT PRIMARY KEY;
+} {1 {cannot edit constraints of view "v1"}}
+
+do_catchsql_test 5.7 {
+  ALTER TABLE nosuchtable DROP CONSTRAINT PRIMARY KEY;
+} {1 {no such table: nosuchtable}}
+
+do_catchsql_test 5.8 {
+  ALTER TABLE sqlite_schema DROP CONSTRAINT PRIMARY KEY;
+} {1 {table sqlite_master may not be altered}}
+
+#-------------------------------------------------------------------------
+# 6.*: the other schemas.
+#
+reset_db
+forcedelete test.db2
+do_execsql_test 6.1.0 {
+  ATTACH 'test.db2' AS aux;
+  CREATE TABLE aux.t1(a TEXT PRIMARY KEY, b);
+  INSERT INTO aux.t1 VALUES('k', 1);
+}
+do_execsql_test 6.1.1 {
+  ALTER TABLE aux.t1 DROP CONSTRAINT PRIMARY KEY;
+  SELECT sql FROM aux.sqlite_schema WHERE name='t1';
+  SELECT * FROM aux.t1;
+} {{CREATE TABLE t1(a TEXT, b)} k 1}
+do_execsql_test 6.1.2 { PRAGMA aux.integrity_check } {ok}
+
+reset_db
+do_execsql_test 6.2.0 {
+  CREATE TEMP TABLE t1(a TEXT PRIMARY KEY, b);
+  INSERT INTO t1 VALUES('k', 1);
+}
+do_execsql_test 6.2.1 {
+  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  SELECT sql FROM temp.sqlite_schema WHERE name='t1';
+  SELECT * FROM t1;
+} {{CREATE TABLE t1(a TEXT, b)} k 1}
+do_execsql_test 6.2.2 { PRAGMA integrity_check } {ok}
+
+# A table in main and a temp table of the same name: the ALTER reaches
+# the temp one, and main is left as it was.
+#
+reset_db
+do_execsql_test 6.3.0 {
+  CREATE TABLE t1(a TEXT PRIMARY KEY, b);
+  CREATE TEMP TABLE t1(a TEXT PRIMARY KEY, b);
+  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  SELECT sql FROM temp.sqlite_schema WHERE name='t1';
+  SELECT sql FROM main.sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a TEXT, b)} {CREATE TABLE t1(a TEXT PRIMARY KEY, b)}}
+
+#-------------------------------------------------------------------------
+# 7.*: views and triggers that mention the table are not disturbed, and a
+# transaction that is rolled back takes the whole drop with it.
+#
+reset_db
+do_execsql_test 7.1.0 {
+  CREATE TABLE t1(a TEXT PRIMARY KEY, b);
+  CREATE VIEW v1 AS SELECT a FROM t1;
+  CREATE TRIGGER tr1 AFTER INSERT ON t1 BEGIN SELECT 1; END;
+}
+do_execsql_test 7.1.1 {
+  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  SELECT sql FROM sqlite_schema ORDER BY name;
+} {{CREATE TABLE t1(a TEXT, b)}
+   {CREATE TRIGGER tr1 AFTER INSERT ON t1 BEGIN SELECT 1; END}
+   {CREATE VIEW v1 AS SELECT a FROM t1}}
+
+reset_db
+do_execsql_test 7.2.0 {
+  CREATE TABLE t1(a TEXT PRIMARY KEY, b);
+  INSERT INTO t1 VALUES('k', 1);
+  BEGIN;
+    ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  ROLLBACK;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a TEXT PRIMARY KEY, b)}}
+do_execsql_test 7.2.1 {
+  SELECT count(*) FROM t1 INDEXED BY sqlite_autoindex_t1_1 WHERE a='k';
+  PRAGMA integrity_check;
+} {1 ok}
+
+#-------------------------------------------------------------------------
+# 8.*: the stored statement is what says where the clause is.  When it
+# disagrees with what is in memory, the text decides - and a statement
+# that no longer describes the table is caught by the reload.
+#
+reset_db
+do_execsql_test 8.1.0 {
+  CREATE TABLE t1(a TEXT PRIMARY KEY, b TEXT);
+  PRAGMA writable_schema = 1;
+  UPDATE sqlite_schema SET sql = 'CREATE TABLE t1(a TEXT, b TEXT PRIMARY KEY)'
+   WHERE name = 't1';
+  PRAGMA writable_schema = 0;
+}
+do_execsql_test 8.1.1 {
+  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a TEXT, b TEXT)}}
+
+# A statement that cannot be parsed is refused, and left alone.
+#
+reset_db
+do_execsql_test 8.2.0 {
+  CREATE TABLE t1(a TEXT PRIMARY KEY, b);
+  PRAGMA writable_schema = 1;
+  UPDATE sqlite_schema SET sql = 'CREATE TABLE t1(a TEXT PRIMARY KEY, b'
+   WHERE name = 't1';
+  PRAGMA writable_schema = 0;
+}
+do_catchsql_test 8.2.1 {
+  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+} {1 {database disk image is malformed}}
+do_execsql_test 8.2.2 {
+  PRAGMA writable_schema = 1;
+  SELECT sql FROM sqlite_schema WHERE type='table';
+} {{CREATE TABLE t1(a TEXT PRIMARY KEY, b}}
+
+# A statement with no PRIMARY KEY in it at all, for a table the cache says
+# has one.  There is nothing to cut out, so the edit is refused.
+#
+reset_db
+do_execsql_test 8.3.0 {
+  CREATE TABLE t1(a TEXT PRIMARY KEY, b);
+  PRAGMA writable_schema = 1;
+  UPDATE sqlite_schema SET sql = 'CREATE TABLE t1(a TEXT, b)' WHERE name='t1';
+  PRAGMA writable_schema = 0;
+}
+do_catchsql_test 8.3.1 {
+  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+} {1 {database disk image is malformed}}
+do_execsql_test 8.3.2 {
+  PRAGMA writable_schema = 1;
+  SELECT sql FROM sqlite_schema WHERE type='table';
+} {{CREATE TABLE t1(a TEXT, b)}}
+
+# The stored statement lists the constraints in a different order than the
+# one the automatic indexes were numbered in.  The index that goes is still
+# the one the key actually owns, and the survivor still indexes b.
+#
+reset_db
+do_execsql_test 8.4.0 {
+  CREATE TABLE t1(a, b, c, PRIMARY KEY(a), UNIQUE(b));
+  PRAGMA writable_schema = 1;
+  UPDATE sqlite_schema SET sql = 'CREATE TABLE t1(a, b, c, UNIQUE(b), PRIMARY KEY(a))'
+   WHERE name = 't1';
+  PRAGMA writable_schema = 0;
+}
+do_execsql_test 8.4.1 {
+  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+  SELECT il.name, ii.name FROM pragma_index_list('t1') il,
+         pragma_index_info(il.name) ii;
+  PRAGMA integrity_check;
+} {{CREATE TABLE t1(a, b, c, UNIQUE(b))} sqlite_autoindex_t1_1 b ok}
+
+finish_test
