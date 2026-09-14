@@ -3076,7 +3076,8 @@ static void dropColConsFunc(
   sqlite3_context *ctx,
   sqlite3_value **argv,
   u8 eType,                       /* Kind of clause to remove */
-  int bAnyCol                     /* True if a NULL COLNAME means "all" */
+  int bTabCons                    /* True if a NULL COLNAME is allowed, and
+                                  ** means the table-level constraints */
 ){
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   int iSchema = sqlite3_value_int(argv[0]);
@@ -3095,7 +3096,7 @@ static void dropColConsFunc(
 #endif
 
   if( zSql==0 || iSchema<0 || iSchema>=db->nDb
-   || (zCol==0 && !bAnyCol)
+   || (zCol==0 && !bTabCons)
   ){
     rc = SQLITE_OK;
     goto drop_notnull_done;
@@ -3115,8 +3116,7 @@ static void dropColConsFunc(
     goto drop_notnull_cleanup;
   }
   if( zCol==0 ){
-    /* Every clause of this kind, wherever it was written. */
-    iCol = -2;
+    iCol = -1;
     goto drop_notnull_edit;
   }
   iCol = alterColumnIndex(pTab, zCol);
@@ -3148,8 +3148,7 @@ drop_notnull_edit:
     ParseLoc *pBest = 0;
 
     for(p=sParse.pLoc; p; p=p->pNext){
-      if( p->eType!=eType ) continue;
-      if( iCol!=-2 && p->iCol!=iCol ) continue;
+      if( p->eType!=eType || p->iCol!=iCol ) continue;
       if( pBest==0 || p->t.z>pBest->t.z ) pBest = p;
     }
     if( pBest==0 ) break;
