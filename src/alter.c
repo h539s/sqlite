@@ -4181,13 +4181,47 @@ unset_strict_done:
 }
 
 /*
-** Generate bytecode to implement:
+** Map the name of a table-option to the TF_ flag that represents it, or
+** return 0 if the name is not one this command understands.
+*/
+static u32 alterTableOptionCode(Token *pOpt){
+  if( pOpt->n==6 && sqlite3_strnicmp(pOpt->z, "strict", 6)==0 ){
+    return TF_Strict;
+  }
+  return 0;
+}
+
+/*
+** Emit the nested SQL that looks for a row the table's new definition
+** rejects.  Run after the schema has been reloaded, so quick_check sees
+** the table as it now is.  Anything it reports aborts the statement, which
+** rolls the schema edit back with it.
 **
-**    ALTER TABLE pSrc SET <table-option> = ON|OFF
-**
-** STRICT is the only table-option this understands.  WITHOUT ROWID cannot
-** be turned on after the fact: it changes the on-disk representation of
-** every row, which is beyond what editing the schema text can do.
+** zOpt names the option in the error message and bOn says which way it was
+** moved, so the message reads "cannot set STRICT on t1: ...".
+*/
+static void alterCheckExistingRows(
+  Parse *pParse,        /* Parsing context */
+  Table *pTab,          /* The table that was altered */
+  const char *zDb,      /* Schema holding pTab */
+  const char *zOpt,     /* Name of the option, for the error message */
+  int bOn               /* True if the option was turned on */
+){
+  pParse->colNamesSet = 1;
+  sqlite3NestedParse(pParse,
+      "SELECT sqlite_fail('cannot %s %s on %q: ' || quick_check, %d) "
+      "FROM pragma_quick_check(%Q,%Q) "
+      "WHERE quick_check GLOB 'non-* value in*' "
+      "OR quick_check GLOB 'NULL value in*' "
+      "OR quick_check GLOB 'TEXT value in*' "
+      "OR quick_check GLOB 'NUMERIC value in*'",
+      bOn ? "set" : "unset", zOpt, pTab->zName, SQLITE_CONSTRAINT,
+      pTab->zName, zDb
+  );
+}
+
+/*
+** Implement "ALTER TABLE pTab SET STRICT = ON|OFF".
 **
 ** Turning STRICT on has to hold up against three things:
 **
@@ -4206,54 +4240,26 @@ unset_strict_done:
 ** once it is not.  Text written into such a column while strict - '123',
 ** say - is stored as text, and a NUMERIC column holding text that
 ** converts losslessly to a number is precisely what quick_check reports
-** as "TEXT value in ...".  So the same check runs in both directions.
-**
-** (2) and (3), and the ANY case above, are all things PRAGMA quick_check
-** reports once the table has its new definition.  So in either direction
-** the schema text is edited first, the schema is reloaded, and quick_check
-** is run against the result.  If it finds anything the statement aborts
-** and the schema edit is rolled back with it.  This is the same shape
-** sqlite3AlterFinishAddColumn() uses.
+** as "TEXT value in ...".  So the same check runs in both directions,
+** through alterCheckExistingRows().
 **
 ** No row data is rewritten in either direction.  STRICT constrains what
 ** may be written from here on; it does not change how existing rows are
 ** stored.
 */
-void sqlite3AlterSetTableOption(
-  Parse *pParse,    /* Parsing context */
-  SrcList *pSrc,    /* The table being altered */
-  Token *pOpt,      /* Name of the table-option being set */
-  int bOn           /* True to turn it on, false to turn it off */
+static void alterSetStrict(
+  Parse *pParse,        /* Parsing context */
+  Table *pTab,          /* The table being altered */
+  int iDb,              /* Index of the schema holding pTab */
+  const char *zDb,      /* Name of that schema */
+  int bOn               /* True to turn STRICT on */
 ){
-  Table *pTab = 0;
-  int iDb = 0;
-  const char *zDb = 0;
   int ii;
-
-  assert( pSrc->nSrc==1 );
-
-  /* The grammar has already reported a right-hand side that is neither ON
-  ** nor OFF.  Return before looking the table up, so that a second and
-  ** less specific message does not replace that one. */
-  if( bOn<0 ){
-    sqlite3SrcListDelete(pParse->db, pSrc);
-    return;
-  }
-
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 3);
-  if( !pTab ) return;
-
-  if( pOpt->n!=6 || sqlite3_strnicmp(pOpt->z, "strict", 6)!=0 ){
-    sqlite3ErrorMsg(pParse, "unknown table option: %.*s", pOpt->n, pOpt->z);
-    return;
-  }
-
-  /* Setting the option to what it already is changes nothing. */
-  if( ((pTab->tabFlags & TF_Strict)!=0)==(bOn!=0) ) return;
 
   assert( IsOrdinaryTable(pTab) );
   if( bOn ){
-    /* (1) Reject custom datatypes up front. */
+    /* Reject custom datatypes up front, before anything is written, so
+    ** that the message matches the one CREATE TABLE would have given. */
     for(ii=0; ii<pTab->nCol; ii++){
       Column *pCol = &pTab->aCol[ii];
       if( pCol->eCType==COLTYPE_CUSTOM ){
@@ -4290,22 +4296,54 @@ void sqlite3AlterSetTableOption(
     );
   }
 
-  /* Reload the database schema, so that the check below runs against the
-  ** table as it now is. */
   renameReloadSchema(pParse, iDb, INITFLAG_AlterSetOpt);
+  alterCheckExistingRows(pParse, pTab, zDb, "STRICT", bOn);
+}
 
-  /* Search for a row that the new definition rejects. */
-  pParse->colNamesSet = 1;
-  sqlite3NestedParse(pParse,
-      "SELECT sqlite_fail('cannot %s STRICT on %q: ' || quick_check, %d) "
-      "FROM pragma_quick_check(%Q,%Q) "
-      "WHERE quick_check GLOB 'non-* value in*' "
-      "OR quick_check GLOB 'NULL value in*' "
-      "OR quick_check GLOB 'TEXT value in*' "
-      "OR quick_check GLOB 'NUMERIC value in*'",
-      bOn ? "set" : "unset", pTab->zName, SQLITE_CONSTRAINT,
-      pTab->zName, zDb
-  );
+/*
+** Generate bytecode to implement:
+**
+**    ALTER TABLE pSrc SET <table-option> = ON|OFF
+**
+** Validate the table and the option name, short-circuit when the option
+** already has the requested value, and hand off to the routine that knows
+** how to move that particular option.
+*/
+void sqlite3AlterSetTableOption(
+  Parse *pParse,    /* Parsing context */
+  SrcList *pSrc,    /* The table being altered */
+  Token *pOpt,      /* Name of the table-option being set */
+  int bOn           /* True to turn it on, false to turn it off */
+){
+  Table *pTab = 0;
+  int iDb = 0;
+  const char *zDb = 0;
+  u32 optFlag;
+
+  assert( pSrc->nSrc==1 );
+
+  /* The grammar has already reported a right-hand side that is neither ON
+  ** nor OFF.  Return before looking the table up, so that a second and
+  ** less specific message does not replace that one. */
+  if( bOn<0 ){
+    sqlite3SrcListDelete(pParse->db, pSrc);
+    return;
+  }
+
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 3);
+  if( !pTab ) return;
+
+  optFlag = alterTableOptionCode(pOpt);
+  if( optFlag==0 ){
+    sqlite3ErrorMsg(pParse, "unknown table option: %.*s", pOpt->n, pOpt->z);
+    return;
+  }
+
+  /* Setting the option to what it already is changes nothing. */
+  if( ((pTab->tabFlags & optFlag)!=0)==(bOn!=0) ) return;
+
+  assert( optFlag==TF_Strict );
+  alterSetStrict(pParse, pTab, iDb, zDb, bOn);
 }
 
 /*
