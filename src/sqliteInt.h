@@ -5610,6 +5610,7 @@ void sqlite3ColumnDefault(Vdbe *, Table *, int, int);
 void sqlite3AlterFinishAddColumn(Parse *, Token *);
 void sqlite3AlterBeginAddColumn(Parse *, SrcList *);
 void sqlite3AlterDropColumn(Parse*, SrcList*, const Token*);
+void sqlite3AlterDropPrimaryKey(Parse*, SrcList*);
 void sqlite3AlterAddNamedConstraint(Parse*,SrcList*,Token*,Token*,int,
                                     ExprList*,const char*,int);
 void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Token*,Token*,Expr*,
@@ -5626,6 +5627,7 @@ void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 ** comment on struct ParseLoc in alter.c for what each one records. */
 #define PARSELOC_NotNull  1
 #define PARSELOC_ColDef   2
+#define PARSELOC_PrimaryKey 3
 const void *sqlite3RenameTokenMap(Parse*, const void*, const Token*);
 void sqlite3RenameTokenRemap(Parse*, const void *pTo, const void *pFrom);
 void sqlite3RenameExprUnmap(Parse*, Expr*);
