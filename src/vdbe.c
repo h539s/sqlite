@@ -8362,8 +8362,8 @@ case OP_Vacuum: {
 */
 case OP_AlterTabOpt: {
   assert( p->readOnly==0 );
-  rc = sqlite3RunAlterTabOpt(&p->zErrMsg, db, pOp->p1, pOp->p4.z,
-                             pOp->p2, pOp->p3);
+  rc = sqlite3RunAlterTabOpt(&p->zErrMsg, db, pOp->p1,
+                             (const AlterRebuild*)pOp->p4.z, pOp->p3);
   /* Creating and dropping objects in the TEMP schema hard-expires every
   ** prepared statement, this one included (see OP_SetCookie).  The schema
   ** change is this statement's own doing and the bytecode that follows was

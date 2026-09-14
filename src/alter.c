@@ -4712,18 +4712,116 @@ static char *alterRewriteCreate(
 }
 
 /*
+** Return a copy of CREATE TABLE statement zSql with the declared type of
+** column zCol replaced by zType.  The caller frees it.  Returns 0 on
+** failure, having set *pzErr when the reason is worth reporting.
+**
+** This is only the edit.  Whether the edit is a safe thing to do on its
+** own is setColTypeFunc()'s question; when it is not, the caller is
+** rebuilding the table and the answer does not arise.
+**
+** The column is resolved against zSql, and the extent of the type it
+** currently declares comes from what the parser recorded during the
+** reparse, so a column written without a type needs no special case: its
+** extent is empty and sits where a type would go.
+*/
+static char *alterRetypeText(
+  sqlite3 *db,          /* Database connection */
+  int iDb,              /* Schema that zSql belongs to */
+  const char *zSql,     /* The CREATE TABLE statement to rewrite */
+  const char *zCol,     /* Column to retype */
+  const char *zType,    /* Its new declared type */
+  char **pzErr          /* OUT: error message, if any */
+){
+  Parse sParse;
+  Table *pTab;
+  ParseLoc *p;
+  char *zNew = 0;
+  int iCol, iStart, iEnd;
+
+  if( renameParseSql(&sParse, db->aDb[iDb].zDbSName, db, zSql, iDb==1) ){
+    goto retype_out;
+  }
+  pTab = sParse.pNewTable;
+  if( pTab==0 || !IsOrdinaryTable(pTab) ) goto retype_out;
+  iCol = alterColumnIndex(pTab, zCol);
+  if( iCol<0 ){
+    if( pzErr ) *pzErr = sqlite3MPrintf(db, "no such column: %s", zCol);
+    goto retype_out;
+  }
+  for(p=sParse.pLoc; p; p=p->pNext){
+    if( p->eType==PARSELOC_ColType && p->iCol==iCol ) break;
+  }
+  if( p==0 ) goto retype_out;
+
+  iStart = (int)(p->t.z - zSql);
+  iEnd = iStart + (int)p->t.n;
+  assert( iStart>=0 && iEnd<=sqlite3Strlen30(zSql) );
+  /* A column that had no type needs a space in front of the new one. */
+  zNew = sqlite3MPrintf(db, "%.*s%s%s%s", iStart, zSql,
+                        p->t.n==0 ? " " : "", zType, &zSql[iEnd]);
+
+retype_out:
+  renameParseCleanup(&sParse);
+  return zNew;
+}
+
+/*
+** What a table is to be rebuilt as.  A rebuild is the same work whatever
+** provoked it - build the replacement beside the original, copy the rows,
+** drop the original, put the name and the dependent objects back - and the
+** only thing that varies is how the replacement's CREATE TABLE is derived
+** from the original's.  This says that, and nothing else.
+**
+** Handed to OP_AlterTabOpt as P4 in a single allocation, the strings living
+** in the tail, so that P4_DYNAMIC frees the whole thing.
+*/
+struct AlterRebuild {
+  const char *zTab;     /* The table being rebuilt */
+  const char *zCol;     /* SET TYPE: the column to retype, else 0 */
+  const char *zType;    /* SET TYPE: its new declared type, else 0 */
+  u8 eWrOp;             /* WITHOUT ROWID: 0 leave alone, 1 add, 2 remove */
+};
+
+/*
+** Build one.  Returns 0 on OOM.
+*/
+static AlterRebuild *alterRebuildNew(
+  sqlite3 *db,
+  const char *zTab,
+  const char *zCol,
+  const char *zType,
+  u8 eWrOp
+){
+  AlterRebuild *p;
+  i64 nTab = zTab ? sqlite3Strlen30(zTab)+1 : 0;
+  i64 nCol = zCol ? sqlite3Strlen30(zCol)+1 : 0;
+  i64 nType = zType ? sqlite3Strlen30(zType)+1 : 0;
+  char *z;
+
+  p = sqlite3DbMallocZero(db, sizeof(*p) + nTab + nCol + nType);
+  if( p==0 ) return 0;
+  z = (char*)&p[1];
+  p->eWrOp = eWrOp;
+  if( zTab ){ memcpy(z, zTab, nTab); p->zTab = z; z += nTab; }
+  if( zCol ){ memcpy(z, zCol, nCol); p->zCol = z; z += nCol; }
+  if( zType ){ memcpy(z, zType, nType); p->zType = z; }
+  return p;
+}
+
+/*
 ** Implement the OP_AlterTabOpt opcode.  See the comment on that opcode for
 ** how the work is split, and alterSetWithoutRowid() for what the two
 ** phases are separated by.
 */
 int sqlite3RunAlterTabOpt(
-  char **pzErrMsg,      /* OUT: error message */
-  sqlite3 *db,          /* Database connection */
-  int iDb,              /* Schema holding the table */
-  const char *zTab,     /* Name of the table being rebuilt */
-  int bOn,              /* True to add WITHOUT ROWID, false to remove it */
-  int iPhase            /* 1 before the DROP, 2 after it */
+  char **pzErrMsg,          /* OUT: error message */
+  sqlite3 *db,              /* Database connection */
+  int iDb,                  /* Schema holding the table */
+  const AlterRebuild *pReb, /* What to rebuild the table as */
+  int iPhase                /* 1 before the DROP, 2 after it */
 ){
+  const char *zTab = pReb->zTab;
   const char *zDb;
   Table *pTab;
   char *zTmp = 0;
@@ -4845,18 +4943,40 @@ int sqlite3RunAlterTabOpt(
     if( rc!=SQLITE_OK ) goto alter_tabopt_err;
   }
 
+  /* Derive the replacement's definition.  The table options are rebuilt
+  ** from flags either way: the one being changed, if one is, and otherwise
+  ** the ones the table already carries. */
   {
-    char *zTmpSql = alterRewriteCreate(db, iDb, zOldSql,
-        (bOn ? TF_WithoutRowid : 0) | (pTab->tabFlags & TF_Strict), zTmp);
-    if( zTmpSql==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
-    zNewSql = alterQualifyDdl(db, zDb, zTmpSql);
-    sqlite3DbFree(db, zTmpSql);
-    if( zNewSql==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
-  }
+    u32 flags;
+    char *zBase = zOldSql;
+    char *zRetyped = 0;
+    char *zTmpSql;
 
-  azRedo[0] = alterRewriteCreate(db, iDb, zOldSql,
-      (bOn ? TF_WithoutRowid : 0) | (pTab->tabFlags & TF_Strict), 0);
-  if( azRedo[0]==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
+    if( pReb->eWrOp ){
+      flags = (pReb->eWrOp==1 ? TF_WithoutRowid : 0)
+            | (pTab->tabFlags & TF_Strict);
+    }else{
+      flags = pTab->tabFlags & (TF_WithoutRowid|TF_Strict);
+    }
+    if( pReb->zCol ){
+      zRetyped = alterRetypeText(db, iDb, zOldSql, pReb->zCol, pReb->zType,
+                                 pzErrMsg);
+      if( zRetyped==0 ){
+        rc = *pzErrMsg ? SQLITE_ERROR : SQLITE_NOMEM_BKPT;
+        goto alter_tabopt_out;
+      }
+      zBase = zRetyped;
+    }
+
+    zTmpSql = alterRewriteCreate(db, iDb, zBase, flags, zTmp);
+    if( zTmpSql ){
+      zNewSql = alterQualifyDdl(db, zDb, zTmpSql);
+      sqlite3DbFree(db, zTmpSql);
+    }
+    if( zNewSql ) azRedo[0] = alterRewriteCreate(db, iDb, zBase, flags, 0);
+    sqlite3DbFree(db, zRetyped);
+    if( azRedo[0]==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
+  }
 
   rc = alterExecSql(db, pzErrMsg, zNewSql);
 
@@ -4997,59 +5117,41 @@ static void alterSetStrict(
 }
 
 /*
-** Implement "ALTER TABLE pTab SET WITHOUT_ROWID = ON|OFF".
+** Generate the three steps of a table rebuild.
 **
-** A rowid table and a WITHOUT ROWID table are different on disk, so unlike
-** STRICT this cannot be a schema-text edit.  The table has to be built
-** anew, and the work is split into three pieces because only one of them
-** is allowed to destroy a b-tree.
+** The work is the same whatever provoked it, so it lives here rather than
+** in each caller: build the replacement beside the original and copy the
+** rows in, drop the original, then give the replacement the original's
+** name and put its indexes and triggers back.  What the replacement is to
+** be is described by the zCol/zType/eWrOp arguments, which are handed
+** through to the opcode and interpreted there against the stored text.
 **
-**   1. OP_AlterTabOpt phase 1 creates the replacement beside the original,
-**      under a derived name, from the stored CREATE TABLE text with the
-**      option list and the name rewritten.  Then it copies the rows in.
-**
-**   2. Ordinary generated DROP TABLE code removes the original.  This has
-**      to be generated here rather than run from inside the opcode:
-**      OP_Destroy refuses while another statement is reading, and the
-**      statement that invokes an opcode is itself one.  Generated into
-**      this statement, the reader count is one and the drop is allowed -
-**      exactly as for a plain DROP TABLE.
-**
-**   3. OP_AlterTabOpt phase 2 renames the replacement into place and
-**      rebuilds the indexes and triggers that went with the original.
+** Only the middle step may destroy a b-tree, and it has to be generated
+** here rather than run from inside the opcode: OP_Destroy refuses while
+** another statement is reading, and the statement that invokes an opcode
+** is itself one.  Generated into this statement, the reader count is one
+** and the drop is allowed, exactly as for a plain DROP TABLE.
 **
 ** The DROP fires foreign key actions on any child row pointing at the
 ** table, and PRAGMA foreign_keys cannot be turned off inside a
-** transaction, so that case is refused up front instead.  This is the same
-** reason the published twelve-step rebuild starts by disabling them.
+** transaction, so that case is refused up front.  This is the same reason
+** the published twelve-step rebuild starts by disabling them.
 */
-static void alterSetWithoutRowid(
+static void alterCodeRebuild(
   Parse *pParse,        /* Parsing context */
-  Table *pTab,          /* The table being altered */
-  int iDb,              /* Index of the schema holding pTab */
-  int bOn               /* True to turn WITHOUT ROWID on */
+  Table *pTab,          /* The table to rebuild */
+  int iDb,              /* Schema holding it */
+  const char *zCol,     /* Column to retype, or 0 */
+  const char *zType,    /* Its new declared type, or 0 */
+  u8 eWrOp              /* 0 leave WITHOUT ROWID alone, 1 add, 2 remove */
 ){
   sqlite3 *db = pParse->db;
   const char *zDb = db->aDb[iDb].zDbSName;
-  Vdbe *v;
-  char *zTab;
-  char *zTmp;
+  AlterRebuild *pReb;
   SrcList *pDrop;
   Token tSchema, tName;
-
-  assert( IsOrdinaryTable(pTab) );
-
-  if( bOn ){
-    if( (pTab->tabFlags & TF_HasPrimaryKey)==0 ){
-      sqlite3ErrorMsg(pParse, "PRIMARY KEY missing on table %s", pTab->zName);
-      return;
-    }
-    if( pTab->tabFlags & TF_Autoincrement ){
-      sqlite3ErrorMsg(pParse,
-          "AUTOINCREMENT not allowed on WITHOUT ROWID tables");
-      return;
-    }
-  }
+  char *zTmp;
+  Vdbe *v;
 
   if( db->flags & SQLITE_ForeignKeys ){
     HashElem *k;
@@ -5085,9 +5187,9 @@ static void alterSetWithoutRowid(
   if( v==0 ) return;
   sqlite3MayAbort(pParse);
 
-  zTab = sqlite3DbStrDup(db, pTab->zName);
-  if( zTab==0 ) return;
-  sqlite3VdbeAddOp4(v, OP_AlterTabOpt, iDb, bOn!=0, 1, zTab, P4_DYNAMIC);
+  pReb = alterRebuildNew(db, pTab->zName, zCol, zType, eWrOp);
+  if( pReb==0 ) return;
+  sqlite3VdbeAddOp4(v, OP_AlterTabOpt, iDb, 0, 1, (char*)pReb, P4_DYNAMIC);
 
   sqlite3TokenInit(&tSchema, (char*)zDb);
   sqlite3TokenInit(&tName, pTab->zName);
@@ -5095,9 +5197,61 @@ static void alterSetWithoutRowid(
   if( pDrop==0 ) return;
   sqlite3DropTable(pParse, pDrop, 0, 0);
 
-  zTab = sqlite3DbStrDup(db, pTab->zName);
-  if( zTab==0 ) return;
-  sqlite3VdbeAddOp4(v, OP_AlterTabOpt, iDb, bOn!=0, 2, zTab, P4_DYNAMIC);
+  pReb = alterRebuildNew(db, pTab->zName, zCol, zType, eWrOp);
+  if( pReb==0 ) return;
+  sqlite3VdbeAddOp4(v, OP_AlterTabOpt, iDb, 0, 2, (char*)pReb, P4_DYNAMIC);
+}
+
+/*
+** Implement "ALTER TABLE pTab SET WITHOUT_ROWID = ON|OFF".
+**
+** A rowid table and a WITHOUT ROWID table are different on disk, so unlike
+** STRICT this cannot be a schema-text edit.  The table has to be built
+** anew, and the work is split into three pieces because only one of them
+** is allowed to destroy a b-tree.
+**
+**   1. OP_AlterTabOpt phase 1 creates the replacement beside the original,
+**      under a derived name, from the stored CREATE TABLE text with the
+**      option list and the name rewritten.  Then it copies the rows in.
+**
+**   2. Ordinary generated DROP TABLE code removes the original.  This has
+**      to be generated here rather than run from inside the opcode:
+**      OP_Destroy refuses while another statement is reading, and the
+**      statement that invokes an opcode is itself one.  Generated into
+**      this statement, the reader count is one and the drop is allowed -
+**      exactly as for a plain DROP TABLE.
+**
+**   3. OP_AlterTabOpt phase 2 renames the replacement into place and
+**      rebuilds the indexes and triggers that went with the original.
+**
+** The DROP fires foreign key actions on any child row pointing at the
+** table, and PRAGMA foreign_keys cannot be turned off inside a
+** transaction, so that case is refused up front instead.  This is the same
+** reason the published twelve-step rebuild starts by disabling them.
+*/
+static void alterSetWithoutRowid(
+  Parse *pParse,        /* Parsing context */
+  Table *pTab,          /* The table being altered */
+  int iDb,              /* Index of the schema holding pTab */
+  int bOn               /* True to turn WITHOUT ROWID on */
+){
+  sqlite3 *db = pParse->db;
+
+  assert( IsOrdinaryTable(pTab) );
+
+  if( bOn ){
+    if( (pTab->tabFlags & TF_HasPrimaryKey)==0 ){
+      sqlite3ErrorMsg(pParse, "PRIMARY KEY missing on table %s", pTab->zName);
+      return;
+    }
+    if( pTab->tabFlags & TF_Autoincrement ){
+      sqlite3ErrorMsg(pParse,
+          "AUTOINCREMENT not allowed on WITHOUT ROWID tables");
+      return;
+    }
+  }
+
+  alterCodeRebuild(pParse, pTab, iDb, 0, 0, bOn ? 1 : 2);
 }
 
 /*
@@ -5302,7 +5456,7 @@ static void setColTypeFunc(
   Parse sParse;
   char *zNew = 0;
   char aOld, aNew;
-  int iCol, iStart, iEnd, nSql;
+  int iCol;
   int bInPk = 0;
   int rc;
 #ifndef SQLITE_OMIT_AUTHORIZATION
@@ -5383,14 +5537,7 @@ static void setColTypeFunc(
     }
   }
 
-  /* Splice the new type in.  A column that had none needs a space in front
-  ** of it; one that had a type is replaced where it stood. */
-  nSql = sqlite3Strlen30(zSql);
-  iStart = (int)(p->t.z - zSql);
-  iEnd = iStart + (int)p->t.n;
-  assert( iStart>=0 && iEnd<=nSql );
-  zNew = sqlite3MPrintf(db, "%.*s%s%s%s", iStart, zSql,
-                        p->t.n==0 ? " " : "", zType, &zSql[iEnd]);
+  zNew = alterRetypeText(db, iSchema, zSql, zCol, zType, 0);
   if( zNew==0 ){
     rc = SQLITE_NOMEM_BKPT;
     goto set_coltype_cleanup;
