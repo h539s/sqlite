@@ -5613,6 +5613,7 @@ void sqlite3AlterAddNamedConstraint(Parse*,SrcList*,Token*,Token*,int,
                                     ExprList*,const char*,int);
 void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Token*,Token*,Expr*,
                             const char*,const char*);
+/* Allowed values for the eType parameter of sqlite3AlterAddNamedConstraint() */
 #define ALTERCONS_Unique      1
 #define ALTERCONS_PrimaryKey  2
 #define ALTERCONS_ForeignKey  3
