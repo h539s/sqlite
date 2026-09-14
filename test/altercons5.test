@@ -390,4 +390,76 @@ do_execsql_test 8.1 {
 } {index sqlite_autoindex_t1_1 table t1}
 do_execsql_test 8.2 { PRAGMA integrity_check } {ok}
 
+#-------------------------------------------------------------------------
+# The stored statement is checked against the live table before it is
+# edited.
+#
+# ALTER TABLE reads two sources: it decides what to do from the in-memory
+# Table, and it edits the text in sqlite_schema.  The schema cookie is what
+# normally keeps those in step, but writable_schema edits neither the cookie
+# nor anything else that would give the divergence away.  So the editors
+# reparse the stored text and compare it against the live table - same
+# number of columns, same names in the same order - and refuse if it is not
+# the definition the command was planned against.
+#
+# Column count and names are the part of a table that none of these
+# commands change, which is what makes them usable as the comparison.
+#
+foreach {tn newsql alter} {
+  1 {CREATE TABLE t1(a, b)}             {ALTER TABLE t1 ALTER c DROP NOT NULL}
+  2 {CREATE TABLE t1(x, y, z)}          {ALTER TABLE t1 ALTER c DROP NOT NULL}
+  3 {CREATE TABLE t1(b, a, c)}          {ALTER TABLE t1 ALTER c DROP NOT NULL}
+  4 {CREATE TABLE t9(a, b, c)}          {ALTER TABLE t1 ALTER c DROP NOT NULL}
+  5 {CREATE TABLE t1(a, b)}             {ALTER TABLE t1 ADD CONSTRAINT k CHECK(a>0)}
+  6 {CREATE TABLE t1(x, y, z)}          {ALTER TABLE t1 ADD CONSTRAINT k UNIQUE(a)}
+  7 {CREATE TABLE t1(a, b)}             {ALTER TABLE t1 ADD CONSTRAINT k (a) DEFAULT 1}
+  8 {CREATE TABLE t1(a, b)}             {ALTER TABLE t1 ALTER c SET NOT NULL}
+  9 {CREATE TABLE t1(x, y, z)}          {ALTER TABLE t1 ADD CHECK(a>0)}
+} {
+  reset_db
+  do_execsql_test 9.$tn.0 {
+    CREATE TABLE t1(a, b, c NOT NULL);
+    PRAGMA writable_schema = 1;
+  }
+  do_execsql_test 9.$tn.1 "UPDATE sqlite_schema SET sql = '$newsql'"
+  do_execsql_test 9.$tn.2 { PRAGMA writable_schema = 0 }
+  do_catchsql_test 9.$tn.3 $alter {1 {database disk image is malformed}}
+
+  # The refusal leaves the stored text exactly as it was.
+  do_execsql_test 9.$tn.4 {
+    PRAGMA writable_schema = 1;
+    SELECT sql FROM sqlite_schema WHERE name IS NOT NULL AND type='table';
+  } [list $newsql]
+}
+
+# DROP CONSTRAINT finds its constraint by scanning rather than by
+# reparsing, but it runs the same check before editing.
+#
+reset_db
+do_execsql_test 9.10.0 {
+  CREATE TABLE t1(a, b, c, CONSTRAINT k CHECK(a>0));
+  PRAGMA writable_schema = 1;
+  UPDATE sqlite_schema SET sql = 'CREATE TABLE t1(x, y, CONSTRAINT k CHECK(x>0))';
+  PRAGMA writable_schema = 0;
+}
+do_catchsql_test 9.10.1 {
+  ALTER TABLE t1 DROP CONSTRAINT k;
+} {1 {database disk image is malformed}}
+do_execsql_test 9.10.2 {
+  PRAGMA writable_schema = 1;
+  SELECT sql FROM sqlite_schema WHERE type='table';
+} {{CREATE TABLE t1(x, y, CONSTRAINT k CHECK(x>0))}}
+
+# The same commands go through when the stored text does agree.
+#
+reset_db
+do_execsql_test 9.9 {
+  CREATE TABLE t1(a, b, c NOT NULL);
+  PRAGMA writable_schema = 1;
+  UPDATE sqlite_schema SET sql = 'CREATE TABLE t1(a, b, c NOT NULL)';
+  PRAGMA writable_schema = 0;
+  ALTER TABLE t1 ADD CONSTRAINT k CHECK(a>0);
+  SELECT sql FROM sqlite_schema WHERE type='table';
+} {{CREATE TABLE t1(a, b, c NOT NULL, CONSTRAINT k CHECK(a>0))}}
+
 finish_test
