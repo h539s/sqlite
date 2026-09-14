@@ -5595,7 +5595,8 @@ void sqlite3AlterAddConstraint(
 );
 void sqlite3AlterSetNotNull(Parse*, SrcList*, Token*, Token*);
 void sqlite3AlterSetTableOption(Parse*, SrcList*, Token*, int);
-int sqlite3RunAlterTabOpt(char**, sqlite3*, int, const char*, int, int);
+typedef struct AlterRebuild AlterRebuild;
+int sqlite3RunAlterTabOpt(char**, sqlite3*, int, const AlterRebuild*, int);
 i64 sqlite3GetToken(const unsigned char *, int *);
 void sqlite3NestedParse(Parse*, const char*, ...);
 void sqlite3ExpirePreparedStatements(sqlite3*, int);
