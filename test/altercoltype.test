@@ -1,0 +1,381 @@
+# 2026 September 14
+#
+# The author disclaims copyright to this source code.  In place of
+# a legal notice, here is a blessing:
+#
+#    May you do good and not evil.
+#    May you find forgiveness for yourself and forgive others.
+#    May you share freely, never taking more than you give.
+#
+#*************************************************************************
+#
+# Tests for ALTER TABLE <table> COLUMN <column> SET TYPE <type>.
+#
+# Only the stored text changes, and only a change that leaves the column's
+# affinity alone is allowed.
+#
+# A declared type is not just documentation: it fixes the column's
+# affinity, and affinity is applied when a value is written.  The rows
+# already in the table, and the keys already in every index over the
+# column, were written under the old affinity.  Changing it would make the
+# file disagree with its own schema - integrity_check reports "TEXT value
+# in t.a", and lookups through the index stop finding rows - and putting
+# that right means rewriting every row and rebuilding every index, which
+# is a table rebuild rather than a text edit.
+#
+# So VARCHAR(20) to TEXT, or INT to INTEGER, is allowed; TEXT to INTEGER
+# is refused.  One affinity-preserving change is refused as well: exactly
+# the word INTEGER, on the PRIMARY KEY of a rowid table, makes the column
+# an alias for the rowid, and INT does not.
+#
+
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+set testprefix altercoltype
+
+# If SQLITE_OMIT_ALTERTABLE is defined, omit this file.
+ifcapable !altertable {
+  finish_test
+  return
+}
+
+#-------------------------------------------------------------------------
+# 1.*: what is left in the stored statement.
+#
+foreach {tn col type before after} {
+  1 a TEXT     { CREATE TABLE t1(a VARCHAR(20), b) }
+               { CREATE TABLE t1(a TEXT, b) }
+
+  2 a INTEGER  { CREATE TABLE t1(a INT, b) }
+               { CREATE TABLE t1(a INTEGER, b) }
+
+  3 a INT      { CREATE TABLE t1(a INTEGER, b) }
+               { CREATE TABLE t1(a INT, b) }
+
+  4 a BLOB     { CREATE TABLE t1(a, b) }
+               { CREATE TABLE t1(a BLOB, b) }
+
+  5 a CLOB     { CREATE TABLE t1(a TEXT, b) }
+               { CREATE TABLE t1(a CLOB, b) }
+
+  6 a DOUBLE   { CREATE TABLE t1(a REAL, b) }
+               { CREATE TABLE t1(a DOUBLE, b) }
+
+  7 a {DECIMAL(4,2)} { CREATE TABLE t1(a NUM, b) }
+                     { CREATE TABLE t1(a DECIMAL(4,2), b) }
+
+  8 b TEXT     { CREATE TABLE t1(a, b VARCHAR(9)) }
+               { CREATE TABLE t1(a, b TEXT) }
+
+  9 a {VARCHAR(9)} { CREATE TABLE t1(a TEXT PRIMARY KEY, b) }
+                   { CREATE TABLE t1(a VARCHAR(9) PRIMARY KEY, b) }
+
+  10 a TEXT    { CREATE TABLE t1(a VARCHAR(20) NOT NULL DEFAULT 'x', b) }
+               { CREATE TABLE t1(a TEXT NOT NULL DEFAULT 'x', b) }
+
+  11 a BLOB    { CREATE TABLE t1(a, b, CHECK(a<>'')) }
+               { CREATE TABLE t1(a BLOB, b, CHECK(a<>'')) }
+
+  12 {my col} TEXT { CREATE TABLE t1("my col" VARCHAR(3), b) }
+                   { CREATE TABLE t1("my col" TEXT, b) }
+
+  13 a TEXT    { CREATE TABLE t1(a VARCHAR(20)) }
+               { CREATE TABLE t1(a TEXT) }
+
+  14 b CLOB    { CREATE TABLE t1(a INT, b TEXT AS (a||'x')) }
+               { CREATE TABLE t1(a INT, b CLOB AS (a||'x')) }
+} {
+  reset_db
+  do_execsql_test 1.$tn.1 $before
+  do_execsql_test 1.$tn.2 "
+    ALTER TABLE t1 COLUMN \"$col\" SET TYPE $type;
+    SELECT sql FROM sqlite_schema WHERE name='t1';
+  " [list [string trim $after]]
+  do_execsql_test 1.$tn.3 { PRAGMA integrity_check } {ok}
+}
+
+#-------------------------------------------------------------------------
+# 2.*: the result is the table that would have been created with that type
+# in the first place.
+#
+foreach {tn col type before after} {
+  1 a TEXT     { CREATE TABLE t1(a VARCHAR(20), b INT, c) }
+               { CREATE TABLE t1(a TEXT, b INT, c) }
+
+  2 a BLOB     { CREATE TABLE t1(a, b, c, UNIQUE(b)) }
+               { CREATE TABLE t1(a BLOB, b, c, UNIQUE(b)) }
+
+  3 a {VARCHAR(4)} { CREATE TABLE t1(a TEXT PRIMARY KEY, b) }
+                   { CREATE TABLE t1(a VARCHAR(4) PRIMARY KEY, b) }
+} {
+  set probe {
+    SELECT cid, name, type, "notnull", coalesce(dflt_value,'~'), pk
+      FROM pragma_table_info('t1');
+    SELECT name, "unique" FROM pragma_index_list('t1') ORDER BY name;
+    SELECT wr, strict, ncol FROM pragma_table_list WHERE name='t1';
+  }
+
+  reset_db
+  execsql $after
+  set ref [execsql $probe]
+
+  reset_db
+  execsql $before
+  do_execsql_test 2.$tn.1 "
+    ALTER TABLE t1 COLUMN $col SET TYPE $type;
+    $probe
+  " $ref
+  do_execsql_test 2.$tn.2 { PRAGMA integrity_check } {ok}
+}
+
+#-------------------------------------------------------------------------
+# 3.*: the file still agrees with its schema.  This is what the affinity
+# rule is for: the rows and the index keys were written under the old
+# affinity, and an allowed change does not touch it.
+#
+reset_db
+do_execsql_test 3.1 {
+  CREATE TABLE t1(a VARCHAR(20), b);
+  CREATE INDEX i1 ON t1(a);
+  INSERT INTO t1 VALUES('123','x'), ('abc','y'), (456,'z');
+}
+do_execsql_test 3.2 {
+  ALTER TABLE t1 COLUMN a SET TYPE TEXT;
+  PRAGMA integrity_check;
+} {ok}
+do_execsql_test 3.3 {
+  SELECT count(*) FROM t1 INDEXED BY i1 WHERE a='123';
+  SELECT count(*) FROM t1 INDEXED BY i1 WHERE a='456';
+} {1 1}
+do_execsql_test 3.4 {
+  SELECT typeof(a)||':'||quote(a) FROM t1 ORDER BY b;
+} {text:'123' text:'abc' text:'456'}
+
+# A WITHOUT ROWID table keeps its rows in the index its PRIMARY KEY
+# defines, so it is the same question asked of the table itself.
+#
+reset_db
+do_execsql_test 3.5 {
+  CREATE TABLE t1(a VARCHAR(9) PRIMARY KEY, b) WITHOUT ROWID;
+  INSERT INTO t1 VALUES('k', 1), ('j', 2);
+  ALTER TABLE t1 COLUMN a SET TYPE TEXT;
+  PRAGMA integrity_check;
+  SELECT quote(a) FROM t1 ORDER BY a;
+} {ok 'j' 'k'}
+
+#-------------------------------------------------------------------------
+# 4.*: a change that would move the affinity is refused, and changes
+# nothing.
+#
+foreach {tn col type before} {
+  1 a INTEGER { CREATE TABLE t1(a TEXT, b) }
+  2 a TEXT    { CREATE TABLE t1(a INT, b) }
+  3 a TEXT    { CREATE TABLE t1(a, b) }
+  7 a TEXT    { CREATE TABLE t1(a, b, CHECK(a<>'')) }
+  4 a INT     { CREATE TABLE t1(a REAL, b) }
+  5 a REAL    { CREATE TABLE t1(a TEXT, b) }
+  6 a BLOB    { CREATE TABLE t1(a TEXT, b) }
+} {
+  reset_db
+  execsql $before
+  do_catchsql_test 4.$tn.1 "
+    ALTER TABLE t1 COLUMN $col SET TYPE $type;
+  " [list 1 "cannot change the type of column \"$col\" to \"$type\": that\
+changes its affinity, and the rows and index entries already stored were\
+written under the old one"]
+  do_execsql_test 4.$tn.2 {
+    SELECT sql FROM sqlite_schema WHERE name='t1';
+  } [list [string trim $before]]
+}
+
+#-------------------------------------------------------------------------
+# 5.*: the rowid alias.  INT and INTEGER share an affinity, but only
+# exactly INTEGER on the PRIMARY KEY of a rowid table makes the column an
+# alias for the rowid, so crossing that line is refused in both
+# directions.
+#
+foreach {tn col type before} {
+  1 a INT     { CREATE TABLE t1(a INTEGER PRIMARY KEY, b) }
+  2 a INTEGER { CREATE TABLE t1(a INT PRIMARY KEY, b) }
+  3 a INT     { CREATE TABLE t1(a INTEGER PRIMARY KEY AUTOINCREMENT, b) }
+} {
+  reset_db
+  execsql $before
+  do_catchsql_test 5.$tn.1 "
+    ALTER TABLE t1 COLUMN $col SET TYPE $type;
+  " [list 1 "cannot change the type of PRIMARY KEY column \"$col\" to\
+\"$type\": only a column declared exactly INTEGER holds the rowid, so this\
+moves where its values live"]
+  do_execsql_test 5.$tn.2 {
+    SELECT sql FROM sqlite_schema WHERE name='t1';
+  } [list [string trim $before]]
+}
+
+# Away from the PRIMARY KEY the same change is fine: nothing about the
+# rowid depends on it.
+#
+reset_db
+do_execsql_test 5.4 {
+  CREATE TABLE t1(a INTEGER, b);
+  INSERT INTO t1 VALUES(7, 'x');
+  ALTER TABLE t1 COLUMN a SET TYPE INT;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+  SELECT quote(a) FROM t1;
+} {{CREATE TABLE t1(a INT, b)} 7}
+
+# And a PRIMARY KEY column that is not the rowid alias either way.
+#
+reset_db
+do_execsql_test 5.5 {
+  CREATE TABLE t1(a TEXT PRIMARY KEY, b);
+  INSERT INTO t1 VALUES('k', 1);
+  ALTER TABLE t1 COLUMN a SET TYPE VARCHAR(9);
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+  SELECT quote(a) FROM t1;
+  PRAGMA integrity_check;
+} {{CREATE TABLE t1(a VARCHAR(9) PRIMARY KEY, b)} 'k' ok}
+
+#-------------------------------------------------------------------------
+# 6.*: the rows are not touched.  Nothing is rewritten, so the values and
+# their storage classes come back as they went in.
+#
+reset_db
+do_execsql_test 6.1 {
+  CREATE TABLE t1(a VARCHAR(20), b);
+  INSERT INTO t1 VALUES('k', 1), (2.5, 2), (NULL, 3), (x'aa', 4);
+}
+do_execsql_test 6.2 {
+  ALTER TABLE t1 COLUMN a SET TYPE TEXT;
+  SELECT typeof(a)||':'||quote(a) FROM t1 ORDER BY b;
+} {text:'k' text:'2.5' null:NULL blob:X'AA'}
+
+#-------------------------------------------------------------------------
+# 7.*: STRICT tables.
+#
+  reset_db
+  do_execsql_test 7.1 {
+    CREATE TABLE t1(a INT, b INT) STRICT;
+    INSERT INTO t1 VALUES(1, 2);
+    ALTER TABLE t1 COLUMN a SET TYPE INTEGER;
+    SELECT sql FROM sqlite_schema WHERE name='t1';
+    PRAGMA integrity_check;
+  } {{CREATE TABLE t1(a INTEGER, b INT) STRICT} ok}
+
+  # A type STRICT does not allow is caught by the reload, which names the
+  # operation that got there.
+  #
+  reset_db
+  do_execsql_test 7.2.0 {CREATE TABLE t1(a TEXT, b INT) STRICT}
+  do_catchsql_test 7.2.1 {
+    ALTER TABLE t1 COLUMN a SET TYPE VARCHAR;
+  } {1 {error in table t1 after set type: unknown datatype for t1.a: "VARCHAR"}}
+  do_execsql_test 7.2.2 {
+    SELECT sql FROM sqlite_schema WHERE name='t1';
+  } {{CREATE TABLE t1(a TEXT, b INT) STRICT}}
+
+#-------------------------------------------------------------------------
+# 8.*: refusals.  Nothing is changed by one.
+#
+reset_db
+do_execsql_test 8.0 { CREATE TABLE t1(a TEXT, b) }
+do_catchsql_test 8.1 {
+  ALTER TABLE t1 COLUMN zz SET TYPE TEXT;
+} {1 {no such column: zz}}
+do_execsql_test 8.2 {
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a TEXT, b)}}
+
+do_catchsql_test 8.3 {
+  ALTER TABLE t1 COLUMN a SET TYPE;
+} {1 {no type given for column "a"}}
+
+# COLUMN is required.
+#
+do_catchsql_test 8.4 {
+  ALTER TABLE t1 a SET TYPE TEXT;
+} {1 {near "a": syntax error}}
+
+do_catchsql_test 8.5 {
+  CREATE VIEW v1 AS SELECT 1 AS x;
+  ALTER TABLE v1 COLUMN x SET TYPE TEXT;
+} {1 {cannot edit constraints of view "v1"}}
+
+do_catchsql_test 8.6 {
+  ALTER TABLE nosuchtable COLUMN a SET TYPE TEXT;
+} {1 {no such table: nosuchtable}}
+
+do_catchsql_test 8.7 {
+  ALTER TABLE sqlite_schema COLUMN name SET TYPE TEXT;
+} {1 {table sqlite_master may not be altered}}
+
+#-------------------------------------------------------------------------
+# 9.*: the other schemas, and ROLLBACK.
+#
+reset_db
+forcedelete test.db2
+do_execsql_test 9.1.0 {
+  ATTACH 'test.db2' AS aux;
+  CREATE TABLE aux.t1(a VARCHAR(20), b);
+  INSERT INTO aux.t1 VALUES('k', 1);
+}
+do_execsql_test 9.1.1 {
+  ALTER TABLE aux.t1 COLUMN a SET TYPE TEXT;
+  SELECT sql FROM aux.sqlite_schema WHERE name='t1';
+  SELECT quote(a) FROM aux.t1;
+} {{CREATE TABLE t1(a TEXT, b)} 'k'}
+do_execsql_test 9.1.2 { PRAGMA aux.integrity_check } {ok}
+
+reset_db
+do_execsql_test 9.2.0 {
+  CREATE TEMP TABLE t1(a VARCHAR(4), b);
+  ALTER TABLE t1 COLUMN a SET TYPE TEXT;
+  SELECT sql FROM temp.sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a TEXT, b)}}
+
+reset_db
+do_execsql_test 9.3.0 {
+  CREATE TABLE t1(a VARCHAR(4), b);
+  BEGIN;
+    ALTER TABLE t1 COLUMN a SET TYPE TEXT;
+  ROLLBACK;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a VARCHAR(4), b)}}
+
+#-------------------------------------------------------------------------
+# 10.*: TYPE is a new keyword, added as an identifier fallback so that
+# using "type" as a name goes on working.
+#
+reset_db
+do_execsql_test 10.1 {
+  CREATE TABLE type(type TEXT, other);
+  INSERT INTO type(type) VALUES('ok');
+  SELECT type FROM type;
+} {ok}
+do_execsql_test 10.2 {
+  SELECT count(*) FROM sqlite_schema WHERE type='table';
+} {1}
+do_execsql_test 10.3 {
+  ALTER TABLE type COLUMN type SET TYPE CLOB;
+  SELECT sql FROM sqlite_schema WHERE name='type';
+} {{CREATE TABLE type(type CLOB, other)}}
+
+#-------------------------------------------------------------------------
+# 11.*: an invalid stored statement is refused, and left alone.
+#
+reset_db
+do_execsql_test 11.1.0 {
+  CREATE TABLE t1(a TEXT, b);
+  PRAGMA writable_schema = 1;
+  UPDATE sqlite_schema SET sql = 'CREATE TABLE t1(a TEXT, b'
+   WHERE name = 't1';
+  PRAGMA writable_schema = 0;
+}
+do_catchsql_test 11.1.1 {
+  ALTER TABLE t1 COLUMN a SET TYPE CLOB;
+} {1 {database disk image is malformed}}
+do_execsql_test 11.1.2 {
+  PRAGMA writable_schema = 1;
+  SELECT sql FROM sqlite_schema WHERE type='table';
+} {{CREATE TABLE t1(a TEXT, b}}
+
+finish_test
