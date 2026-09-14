@@ -5572,10 +5572,11 @@ void sqlite3AlterSetColumnType(
   sqlite3 *db = pParse->db;
   Table *pTab;
   int iDb = 0;
-  int iDummy;
+  int iCol;
   const char *zDb = 0;
   char *zCol = 0;
   char *zType = 0;
+  int bRebuild;
 
   assert( pSrc->nSrc==1 );
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
@@ -5588,18 +5589,37 @@ void sqlite3AlterSetColumnType(
   ** column; the index it returns is not used, the editor resolving the
   ** name against the text it is about to edit. */
   if( alterFindCol(pParse, pTab, pCol, &iDummy) ) return;
+  if( alterFindCol(pParse, pTab, pCol, &iCol) ) return;
   zCol = sqlite3NameFromToken(db, pCol);
   zType = sqlite3DbStrNDup(db, pType->z, pType->n);
   if( zCol==0 || zType==0 ) goto set_type_exit;
 
-  sqlite3NestedParse(pParse,
-      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_set_coltype(%d, sql, %Q, %Q) "
-      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iDb, zCol, zType, pTab->zName
-  );
+  bRebuild = pTab->aCol[iCol].affinity!=sqlite3AffinityType(zType, 0);
+  if( !bRebuild && (pTab->tabFlags & TF_WithoutRowid)==0 ){
+    int bInPk = pTab->iPKey==iCol;
+    if( !bInPk ){
+      Index *pPk = sqlite3PrimaryKeyIndex(pTab);
+      int i;
+      if( pPk ) for(i=0; i<pPk->nKeyCol; i++){
+        if( pPk->aiColumn[i]==iCol ) bInPk = 1;
+      }
+    }
+    if( bInPk && (pTab->iPKey==iCol)!=(sqlite3StrICmp(zType,"INTEGER")==0) ){
+      bRebuild = 1;
+    }
+  }
 
-  renameReloadSchema(pParse, iDb, INITFLAG_AlterSetType);
+  if( bRebuild ){
+    alterCodeRebuild(pParse, pTab, iDb, zCol, zType, 0);
+  }else{
+    sqlite3NestedParse(pParse,
+        "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
+        "sql = sqlite_set_coltype(%d, sql, %Q, %Q) "
+        "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
+        , zDb, iDb, zCol, zType, pTab->zName
+    );
+    renameReloadSchema(pParse, iDb, INITFLAG_AlterSetType);
+  }
 
 set_type_exit:
   sqlite3DbFree(db, zCol);
