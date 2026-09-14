@@ -1954,8 +1954,23 @@ cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(Y) nm(Z) CHECK LP(A) expr(E) RP(B
 cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) LP(A) expr(E) RP(B) onconf. {
   sqlite3AlterAddConstraint(pParse, X, &Y, 0, A.z+1, (B.z-A.z-1), E);
 }
-cmd ::= ALTER TABLE fullname(X) SET nm(Y) EQ ON. {
-  sqlite3AlterSetTableOption(pParse, X, &Y);
+cmd ::= ALTER TABLE fullname(X) SET nm(Y) EQ onoff(Z). {
+  sqlite3AlterSetTableOption(pParse, X, &Y, Z);
+}
+
+%type onoff {int}
+onoff(A) ::= ON.       {A = 1;}
+onoff(A) ::= nm(X). {
+  Token sVal = X;
+  sqlite3DequoteToken(&sVal);
+  if( sVal.n==3 && sqlite3_strnicmp(sVal.z,"off",3)==0 ){
+    A = 0;
+  }else if( sVal.n==2 && sqlite3_strnicmp(sVal.z,"on",2)==0 ){
+    A = 1;
+  }else{
+    A = -1;
+    sqlite3ErrorMsg(pParse, "expected ON or OFF, got: %T", &X);
+  }
 }
 
 // ALTER TABLE ... ADD CONSTRAINT <name> <constraint>

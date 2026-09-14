@@ -4053,6 +4053,9 @@ struct Parse {
   const char *zConsIns;     /* Where a new table-constraint is spliced in: the
                             ** ")" closing the column list.  IN_RENAME_OBJECT
                             ** only, and 0 for a CREATE TABLE ... AS SELECT. */
+  const char *zTabOpt;      /* First byte after the ")" closing the column
+                            ** list of a CREATE TABLE.  Only set when
+                            ** IN_RENAME_OBJECT. */
 #endif
 };
 
@@ -5585,7 +5588,7 @@ void sqlite3AlterAddConstraint(
   Expr *pExpr              /* The parsed CHECK expression */
 );
 void sqlite3AlterSetNotNull(Parse*, SrcList*, Token*, Token*);
-void sqlite3AlterSetTableOption(Parse*, SrcList*, Token*);
+void sqlite3AlterSetTableOption(Parse*, SrcList*, Token*, int);
 i64 sqlite3GetToken(const unsigned char *, int *);
 void sqlite3NestedParse(Parse*, const char*, ...);
 void sqlite3ExpirePreparedStatements(sqlite3*, int);
