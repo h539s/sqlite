@@ -1926,6 +1926,57 @@ cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) LP(A) expr(E) RP(B) onconf. {
   sqlite3AlterAddConstraint(pParse, X, &Y, 0, A.z+1, (B.z-A.z-1), E);
 }
 
+cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N)
+        UNIQUE LP(A) sortlist(L) RP(B) onconf. {
+  sqlite3AlterAddNamedConstraint(pParse, X, &K, &N, ALTERCONS_Unique,
+                                 L, A.z+1, (int)(B.z-A.z-1));
+}
+cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N)
+        PRIMARY KEY LP(A) sortlist(L) autoinc(I) RP(B) onconf. {
+  if( I ){
+    sqlite3ErrorMsg(pParse, "AUTOINCREMENT is only allowed on an "
+                            "INTEGER PRIMARY KEY");
+    sqlite3ExprListDelete(pParse->db, L);
+    sqlite3SrcListDelete(pParse->db, X);
+  }else{
+    sqlite3AlterAddNamedConstraint(pParse, X, &K, &N, ALTERCONS_PrimaryKey,
+                                   L, A.z+1, (int)(B.z-A.z-1));
+  }
+}
+cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N)
+        FOREIGN KEY LP eidlist(FA) RP
+        REFERENCES nm(T) eidlist_opt(TA) refargs defer_subclause_opt. {
+  sqlite3ExprListDelete(pParse->db, FA);
+  sqlite3ExprListDelete(pParse->db, TA);
+  (void)T;
+  sqlite3AlterAddNamedConstraint(pParse, X, &K, &N, ALTERCONS_ForeignKey,
+                                 0, 0, 0);
+}
+
+cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
+        DEFAULT scantok(A) term(E). {
+  sqlite3AlterAddDefault(pParse, X, &K, &N, &C, E, A.z, &A.z[A.n]);
+}
+cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
+        DEFAULT LP(A) expr(E) RP(Z). {
+  sqlite3AlterAddDefault(pParse, X, &K, &N, &C, E, A.z, &Z.z[Z.n]);
+}
+cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
+        DEFAULT PLUS(A) scantok(Z) term(E). {
+  sqlite3AlterAddDefault(pParse, X, &K, &N, &C, E, A.z, &Z.z[Z.n]);
+}
+cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
+        DEFAULT MINUS(A) scantok(Z) term(E). {
+  Expr *p = sqlite3PExpr(pParse, TK_UMINUS, E, 0);
+  sqlite3AlterAddDefault(pParse, X, &K, &N, &C, p, A.z, &Z.z[Z.n]);
+}
+cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
+        DEFAULT scantok id(E). {
+  Expr *p = tokenExpr(pParse, TK_STRING, E);
+  if( p ) sqlite3ExprIdToTrueFalse(p);
+  sqlite3AlterAddDefault(pParse, X, &K, &N, &C, p, E.z, &E.z[E.n]);
+}
+
 kwcolumn_opt ::= .
 kwcolumn_opt ::= COLUMNKW.
 
