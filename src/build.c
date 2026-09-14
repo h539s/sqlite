@@ -1675,6 +1675,10 @@ void sqlite3AddNotNull(
   pCol->notNull = (u8)onError;
   p->tabFlags |= TF_HasNotNull;
 
+  /* Record where this constraint lives within the text being parsed, so
+  ** that ALTER TABLE ... DROP NOT NULL can excise it without having to
+  ** hunt for it with a lexical scan.  Only done for the reparse of a
+  ** stored CREATE TABLE statement - see renameParseSql().  */
   if( IN_RENAME_OBJECT ){
     sqlite3NotNullLocAdd(pParse, p->nCol-1, zStart, zEnd);
   }

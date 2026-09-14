@@ -733,6 +733,24 @@ struct RenameToken {
   RenameToken *pNext;    /* Next is a list of all RenameToken objects */
 };
 
+/*
+** Each NotNullLoc object records where one NOT NULL constraint lives
+** within the text of the CREATE TABLE statement being parsed.
+**
+** Where a RenameToken anchors on the identity of a parse-tree element,
+** a NotNullLoc anchors on the ordinal of the column that owns the
+** constraint.  It has to: a NOT NULL constraint leaves no addressable
+** object behind - it becomes four bits in Column.notNull - so there is
+** nothing for a RenameToken to point at.  A column index always exists.
+**
+** Objects are only created while IN_RENAME_OBJECT, which means only
+** during the reparse of a stored schema statement performed by
+** renameParseSql().  The extent t therefore always points into the same
+** string that the caller is about to edit.
+**
+** Created by sqlite3NotNullLocAdd() and consumed by dropNotNullFunc(),
+** both further down in this file.
+*/
 struct NotNullLoc {
   int iCol;              /* Index of the column owning this constraint */
   Token t;               /* Extent of the constraint text */
@@ -2448,7 +2466,12 @@ static int getWhitespace(const u8 *z){
 
 
 /*
-** Argument z points into the body of a constraint - specifically the 
+** Trim trailing whitespace and comments from the extent that starts at
+** zStart and ends immediately before zEnd.  Return the trimmed length.
+**
+** Tokens tile the input exactly, and zEnd is always a token boundary, so
+** this never needs to look at a partial token.
+*/
 static int notNullRtrim(const char *zStart, const char *zEnd){
   int nMax = (int)(zEnd - zStart);
   int iOff = 0;
@@ -2464,6 +2487,22 @@ static int notNullRtrim(const char *zStart, const char *zEnd){
   return nRet;
 }
 
+/*
+** Record the location of a NOT NULL constraint on column iCol.  zStart
+** points at the "NOT" keyword and zEnd just past the "NULL" keyword.
+**
+** The constraint may extend past zEnd with an ON CONFLICT clause.  At the
+** point this is called Parse.sLastToken holds the parser's lookahead -
+** the first token after the whole constraint - so it bounds the extent
+** from above.  The bound is generous (it includes any intervening
+** whitespace and comments) and notNullRtrim() pulls it back to the last
+** real token.
+**
+** If the constraint is named, and the "CONSTRAINT <name>" clause is
+** separated from the "NOT" keyword by nothing but whitespace and
+** comments, then the name is part of this constraint and the extent is
+** widened to the left to take it in.
+*/
 void sqlite3NotNullLocAdd(
   Parse *pParse,        /* Parsing context */
   int iCol,             /* Index of the column being constrained */
@@ -2478,6 +2517,7 @@ void sqlite3NotNullLocAdd(
   assert( pParse->isCreate );
   assert( zStart!=0 && zEnd!=0 && zEnd>zStart );
 
+  /* Widen to the left over an immediately preceding "CONSTRAINT <name>". */
   zKw = pParse->u1.cr.zConsKw;
   if( zKw!=0 ){
     const char *zGap = pParse->u1.cr.zConsEnd;
@@ -2489,6 +2529,7 @@ void sqlite3NotNullLocAdd(
     }
   }
 
+  /* Extend to the right as far as the parser's lookahead allows. */
   zLimit = pParse->sLastToken.z;
   if( zLimit==0 || zLimit<zEnd ) zLimit = zEnd;
 
@@ -2501,6 +2542,9 @@ void sqlite3NotNullLocAdd(
   pParse->pNotNull = pNew;
 }
 
+/*
+** Free a list of NotNullLoc objects.
+*/
 void sqlite3NotNullLocFree(sqlite3 *db, NotNullLoc *pLoc){
   while( pLoc ){
     NotNullLoc *pNext = pLoc->pNext;
@@ -2509,6 +2553,8 @@ void sqlite3NotNullLocFree(sqlite3 *db, NotNullLoc *pLoc){
   }
 }
 
+/*
+** Argument z points into the body of a constraint - specifically the
 ** second token of the constraint definition.  For a named constraint,
 ** z points to the second token of the constraint definition. For an 
 ** unnamed NOT NULL constraint, z points to the first byte past the NOT 
@@ -2765,6 +2811,26 @@ static void dropConstraintFunc(
   }
 }
 
+/*
+** Internal SQL function:
+**
+**     sqlite_drop_notnull(ISCHEMA, SQL, ICOL)
+**
+** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
+** copy of that statement with every NOT NULL constraint on the ICOL-th
+** column (the left-most column is 0) removed.  If the column has no NOT
+** NULL constraint the statement is returned unchanged, which follows
+** postgres and matches what the INTEGER form of sqlite_drop_constraint()
+** does.
+**
+** This is the "technique C" counterpart of sqlite_drop_constraint().
+** Instead of scanning the text for the constraint, it reparses the
+** statement and reads the extents that sqlite3NotNullLocAdd() recorded
+** during that parse.  Because the parser - not a heuristic scan - decides
+** which column each constraint belongs to, a column carrying more than one
+** NOT NULL clause has all of them removed.  The scanning implementation
+** removes only the first, silently leaving the column NOT NULL.
+*/
 static void dropNotNullFunc(
   sqlite3_context *ctx,
   int NotUsed,
@@ -2809,6 +2875,11 @@ static void dropNotNullFunc(
   }
   memcpy(zOut, zSql, (size_t)nOut+1);
 
+  /* Excise the right-most constraint still to be removed, then repeat.
+  ** Working right to left means every offset not yet used still addresses
+  ** the same byte of zOut that it addressed in zSql.  Entries that have
+  ** been dealt with are marked by setting iCol to -1 rather than being
+  ** unlinked, so that the list stays owned by sParse. */
   while( 1 ){
     NotNullLoc *p;
     NotNullLoc *pBest = 0;
@@ -2826,6 +2897,14 @@ static void dropNotNullFunc(
     iEnd = iStart + (int)pBest->t.n;
     assert( iStart>=0 && iEnd<=nOut );
 
+    /* Absorb any whitespace and comments that follow the constraint, and
+    ** the whitespace that precedes it.  If what comes next closes the
+    ** column definition, the two neighbours can simply abut: "a INT NOT
+    ** NULL, b" becomes "a INT, b" and not "a INT , b".  Otherwise exactly
+    ** one space is left behind to keep them apart.
+    **
+    ** Comments in front of the constraint are deliberately left alone.
+    ** They belong to the column, not to the constraint being dropped. */
     iEnd += getWhitespace((const u8*)&zOut[iEnd]);
     sqlite3GetToken((const u8*)&zOut[iEnd], &t);
     while( iStart>0 && sqlite3Isspace(zOut[iStart-1]) ) iStart--;
