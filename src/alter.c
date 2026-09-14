@@ -603,7 +603,8 @@ static int isRealTable(Parse *pParse, Table *pTab, int iOp){
 #endif
   if( zType ){
     const char *azMsg[] = {
-      "rename columns of", "drop column from", "edit constraints of"
+      "rename columns of", "drop column from", "edit constraints of",
+      "set table options on"
     };
     assert( iOp>=0 && iOp<ArraySize(azMsg) );
     sqlite3ErrorMsg(pParse, "cannot %s %s \"%s\"",
@@ -3202,7 +3203,8 @@ static Table *alterFindTable(
   SrcList *pSrc,        /* Name of the table to look for */
   int *piDb,            /* OUT: write the iDb here */
   const char **pzDb,    /* OUT: write name of schema here */
-  int bAuth             /* Do ALTER TABLE authorization checks if true */
+  int bAuth,            /* Do ALTER TABLE authorization checks if true */
+  int iOp               /* isRealTable() operation code for error messages */
 ){
   sqlite3 *db = pParse->db;
   Table *pTab = 0;
@@ -3213,7 +3215,7 @@ static Table *alterFindTable(
     *pzDb = db->aDb[iDb].zDbSName;
     *piDb = iDb;
 
-    if( SQLITE_OK!=isRealTable(pParse, pTab, 2) 
+    if( SQLITE_OK!=isRealTable(pParse, pTab, iOp) 
      || SQLITE_OK!=isAlterableTable(pParse, pTab) 
     ){
       pTab = 0;
@@ -3252,7 +3254,7 @@ void sqlite3AlterDropConstraint(
 
   assert( (pCol==0)!=(pCons==0) );
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, pCons!=0);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, pCons!=0, 2);
   if( !pTab ) return;
 
   if( pCons ){
@@ -3361,7 +3363,7 @@ void sqlite3AlterSetNotNull(
 
   /* Look up the table being altered. */
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0, 2);
   if( !pTab ) return;
 
   /* Find the column being altered.  alterFindCol() authorizes the change and
@@ -3472,7 +3474,7 @@ void sqlite3AlterAddConstraint(
 
   /* Look up the table being altered. */
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
   if( !pTab ){
     sqlite3ExprDelete(pParse->db, pExpr);
     return;
@@ -3657,7 +3659,7 @@ void sqlite3AlterAddNamedConstraint(
   assert( eType==ALTERCONS_Unique || eType==ALTERCONS_PrimaryKey
        || eType==ALTERCONS_ForeignKey );
 
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
   if( pTab==0 ) goto add_named_cons_exit;
 
   if( eType==ALTERCONS_PrimaryKey ){
@@ -3771,7 +3773,7 @@ void sqlite3AlterAddDefault(
   char *zCons = 0;
 
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
   if( pTab==0 ) goto add_default_exit;
   if( alterFindCol(pParse, pTab, pCol, &iCol) ) goto add_default_exit;
 
@@ -3974,7 +3976,7 @@ void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
   const char *zDb = 0;
 
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
   if( pTab==0 ) return;
 
   if( (pTab->tabFlags & TF_HasPrimaryKey)==0 ){
@@ -4045,6 +4047,151 @@ void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
 }
 
 /*
+** Internal SQL function:
+**
+**     sqlite_set_strict(SQL, BSEP)
+**
+** SQL is a CREATE TABLE statement.  Return a copy of it with the STRICT
+** table-option appended.  BSEP is true if the statement already carries a
+** table-option list (in practice, WITHOUT ROWID) and the new option has to
+** be introduced with a comma rather than with a space.
+**
+** The caller knows whether a separator is needed because it read
+** TF_WithoutRowid off the Table object.  Nothing here has to go looking
+** for it in the text.
+**
+** The only text work is deciding where the statement really ends.  The
+** stored SQL can carry trailing whitespace, and when the CREATE TABLE was
+** followed by a semicolon it can carry a trailing comment as well.
+** Appending after a "--" comment would bury the new option inside it, so
+** alterRtrimConstraint() is used to step back to the end of the last real
+** token.  It keeps block comments, which are terminated and so are safe to
+** append after.
+*/
+static void setStrictFunc(
+  sqlite3_context *ctx,
+  int NotUsed,
+  sqlite3_value **argv
+){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  const char *zSql = (const char*)sqlite3_value_text(argv[0]);
+  int bSep = sqlite3_value_int(argv[1]);
+  int nSql;
+  char *zNew;
+
+  UNUSED_PARAMETER(NotUsed);
+  if( zSql==0 ) return;
+
+  nSql = alterRtrimConstraint(db, zSql, sqlite3Strlen30(zSql));
+  if( nSql<=0 ){
+    sqlite3_result_error_code(ctx, db->mallocFailed ? SQLITE_NOMEM
+                                                    : SQLITE_CORRUPT_BKPT);
+    return;
+  }
+
+  zNew = sqlite3MPrintf(db, "%.*s%s STRICT", nSql, zSql, bSep ? "," : "");
+  if( zNew==0 ){
+    sqlite3_result_error_nomem(ctx);
+    return;
+  }
+  sqlite3_result_text(ctx, zNew, -1, SQLITE_DYNAMIC);
+}
+
+/*
+** Generate bytecode to implement:
+**
+**    ALTER TABLE pSrc SET <table-option> = ON
+**
+** STRICT is the only table-option this understands.  WITHOUT ROWID cannot
+** be turned on after the fact: it changes the on-disk representation of
+** every row, which is beyond what editing the schema text can do.
+**
+** Turning STRICT on has to hold up against three things:
+**
+**   (1) Every column must be declared with one of the standard datatypes.
+**       Checked here, before anything is written, so that the statement
+**       fails with the same message CREATE TABLE would have given.
+**
+**   (2) Every value already stored must match its column's declared type.
+**
+**   (3) Every column of a non-INTEGER PRIMARY KEY acquires an implied NOT
+**       NULL, so no such column may already hold a NULL.
+**
+** (2) and (3) are exactly what PRAGMA quick_check reports once the table
+** is strict, so the schema text is edited first, the schema is reloaded,
+** and quick_check is then run against the new definition.  If it finds
+** anything the statement aborts and the schema edit is rolled back with
+** it.  This is the same shape sqlite3AlterFinishAddColumn() uses.
+**
+** No row data is rewritten.  STRICT constrains what may be written from
+** here on; it does not change how existing rows are stored.
+*/
+void sqlite3AlterSetTableOption(
+  Parse *pParse,    /* Parsing context */
+  SrcList *pSrc,    /* The table being altered */
+  Token *pOpt       /* Name of the table-option being turned on */
+){
+  Table *pTab = 0;
+  int iDb = 0;
+  const char *zDb = 0;
+  int ii;
+
+  assert( pSrc->nSrc==1 );
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 3);
+  if( !pTab ) return;
+
+  if( pOpt->n!=6 || sqlite3_strnicmp(pOpt->z, "strict", 6)!=0 ){
+    sqlite3ErrorMsg(pParse, "unknown table option: %.*s", pOpt->n, pOpt->z);
+    return;
+  }
+
+  /* Turning STRICT on when it is already on changes nothing. */
+  if( pTab->tabFlags & TF_Strict ) return;
+
+  /* (1) Reject custom datatypes up front. */
+  assert( IsOrdinaryTable(pTab) );
+  for(ii=0; ii<pTab->nCol; ii++){
+    Column *pCol = &pTab->aCol[ii];
+    if( pCol->eCType==COLTYPE_CUSTOM ){
+      if( pCol->colFlags & COLFLAG_HASTYPE ){
+        sqlite3ErrorMsg(pParse, "unknown datatype for %s.%s: \"%s\"",
+            pTab->zName, pCol->zCnName, sqlite3ColumnType(pCol, "")
+        );
+      }else{
+        sqlite3ErrorMsg(pParse, "missing datatype for %s.%s",
+            pTab->zName, pCol->zCnName
+        );
+      }
+      return;
+    }
+  }
+
+  sqlite3MayAbort(pParse);
+
+  /* Edit the SQL for the named table. */
+  sqlite3NestedParse(pParse,
+      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
+      "sql = sqlite_set_strict(sql, %d) "
+      "WHERE type='table' AND name=%Q COLLATE nocase"
+      , zDb, (pTab->tabFlags & TF_WithoutRowid)!=0, pTab->zName
+  );
+
+  /* Reload the database schema, so that the checks below run against the
+  ** table as it now is. */
+  renameReloadSchema(pParse, iDb, INITFLAG_AlterSetOpt);
+
+  /* (2) and (3): search for a row that the new definition rejects. */
+  pParse->colNamesSet = 1;
+  sqlite3NestedParse(pParse,
+      "SELECT sqlite_fail('cannot set STRICT on %q: ' || quick_check, %d) "
+      "FROM pragma_quick_check(%Q,%Q) "
+      "WHERE quick_check GLOB 'non-* value in*' "
+      "OR quick_check GLOB 'NULL value in*'",
+      pTab->zName, SQLITE_CONSTRAINT, pTab->zName, zDb
+  );
+}
+
+/*
 ** Register built-in functions used to help implement ALTER TABLE
 */
 void sqlite3AlterFunctions(void){
@@ -4060,6 +4207,7 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_fail,           2, failConstraintFunc),
     INTERNAL_FUNCTION(sqlite_insert_constraint,4,insertConstraintFunc),
     INTERNAL_FUNCTION(sqlite_find_constraint,2, findConstraintFunc),
+    INTERNAL_FUNCTION(sqlite_set_strict,     2, setStrictFunc),
   };
   sqlite3InsertBuiltinFuncs(aAlterTableFuncs, ArraySize(aAlterTableFuncs));
 }
