@@ -5413,7 +5413,7 @@ int sqlite3JoinType(Parse*, Token*, Token*, Token*);
 int sqlite3ColumnIndex(Table *pTab, const char *zCol);
 void sqlite3SrcItemColumnUsed(SrcItem*,int);
 void sqlite3SetJoinExpr(Expr*,int,u32);
-void sqlite3CreateForeignKey(Parse*, ExprList*, Token*, ExprList*, int);
+void sqlite3CreateForeignKey(Parse*,ExprList*,Token*,ExprList*,int,Token*);
 void sqlite3DeferForeignKey(Parse*, int);
 #ifndef SQLITE_OMIT_AUTHORIZATION
   void sqlite3AuthRead(Parse*,Expr*,Schema*,SrcList*);
@@ -5622,6 +5622,8 @@ void sqlite3AlterFinishAddColumn(Parse *, Token *);
 void sqlite3AlterBeginAddColumn(Parse *, SrcList *);
 void sqlite3AlterDropColumn(Parse*, SrcList*, const Token*);
 void sqlite3AlterDropPrimaryKey(Parse*, SrcList*);
+void sqlite3AlterDropForeignKey(Parse*,SrcList*,ExprList*,Token*,
+                                ExprList*);
 void sqlite3AlterAddNamedConstraint(Parse*,SrcList*,Token*,Token*,int,
                                     ExprList*,const char*,int);
 void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Token*,Token*,Expr*,
@@ -5634,6 +5636,7 @@ void sqlite3ConsLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ColDefLocExtend(Parse*);
 void sqlite3DefaultLocAdd(Parse*, Token*);
+void sqlite3FkLocExtend(Parse*, const char*);
 void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 /* Allowed values for the second argument to sqlite3ParseLocAdd().  See the
 ** comment on struct ParseLoc in alter.c for what each one records. */
@@ -5641,6 +5644,7 @@ void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 #define PARSELOC_ColDef   2
 #define PARSELOC_PrimaryKey 3
 #define PARSELOC_Default   4
+#define PARSELOC_ForeignKey 5
 const void *sqlite3RenameTokenMap(Parse*, const void*, const Token*);
 void sqlite3RenameTokenRemap(Parse*, const void *pTo, const void *pFrom);
 void sqlite3RenameExprUnmap(Parse*, Expr*);
