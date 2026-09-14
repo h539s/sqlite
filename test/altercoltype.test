@@ -11,22 +11,21 @@
 #
 # Tests for ALTER TABLE <table> COLUMN <column> SET TYPE <type>.
 #
-# Only the stored text changes, and only a change that leaves the column's
-# affinity alone is allowed.
+# Any type may be asked for.  Which of two routes gets there depends on
+# whether the column's affinity moves.
 #
-# A declared type is not just documentation: it fixes the column's
-# affinity, and affinity is applied when a value is written.  The rows
-# already in the table, and the keys already in every index over the
-# column, were written under the old affinity.  Changing it would make the
-# file disagree with its own schema - integrity_check reports "TEXT value
-# in t.a", and lookups through the index stop finding rows - and putting
-# that right means rewriting every row and rebuilding every index, which
-# is a table rebuild rather than a text edit.
+# A declared type fixes the column's affinity, and affinity is applied
+# when a value is written.  The rows already in the table, and the keys
+# already in every index over the column, were written under the old one.
+# So when the affinity stays put - VARCHAR(20) to TEXT, INT to INTEGER -
+# nothing on disk is affected and the stored statement is simply edited.
+# When it moves, every row and every index entry is written again, which
+# is a table rebuild.
 #
-# So VARCHAR(20) to TEXT, or INT to INTEGER, is allowed; TEXT to INTEGER
-# is refused.  One affinity-preserving change is refused as well: exactly
-# the word INTEGER, on the PRIMARY KEY of a rowid table, makes the column
-# an alias for the rowid, and INT does not.
+# One affinity-preserving change is a rebuild too: exactly the word
+# INTEGER, on the PRIMARY KEY of a rowid table, makes the column an alias
+# for the rowid and INT does not, so crossing that line moves the values
+# between the record and the rowid.
 #
 
 set testdir [file dirname $argv0]
@@ -164,66 +163,160 @@ do_execsql_test 3.5 {
 } {ok 'j' 'k'}
 
 #-------------------------------------------------------------------------
-# 4.*: a change that would move the affinity is refused, and changes
-# nothing.
+# 4.*: a change that moves the affinity goes through a rebuild, and the
+# values are written again under the new one.
 #
-foreach {tn col type before} {
+foreach {tn col type before after rows want} {
   1 a INTEGER { CREATE TABLE t1(a TEXT, b) }
+              { CREATE TABLE t1(a INTEGER, b) }
+              {('123',1),('456',2)} {integer:123 integer:456}
+
   2 a TEXT    { CREATE TABLE t1(a INT, b) }
+              { CREATE TABLE t1(a TEXT, b) }
+              {(7,1),(8,2)} {text:'7' text:'8'}
+
   3 a TEXT    { CREATE TABLE t1(a, b) }
-  7 a TEXT    { CREATE TABLE t1(a, b, CHECK(a<>'')) }
+              { CREATE TABLE t1(a TEXT, b) }
+              {('k',1),(9,2)} {text:'k' text:'9'}
+
   4 a INT     { CREATE TABLE t1(a REAL, b) }
+              { CREATE TABLE t1(a INT, b) }
+              {(2.5,1),(4.0,2)} {real:2.5 integer:4}
+
   5 a REAL    { CREATE TABLE t1(a TEXT, b) }
+              { CREATE TABLE t1(a REAL, b) }
+              {('2.5',1)} {real:2.5}
+
   6 a BLOB    { CREATE TABLE t1(a TEXT, b) }
+              { CREATE TABLE t1(a BLOB, b) }
+              {('k',1)} {text:'k'}
 } {
   reset_db
   execsql $before
-  do_catchsql_test 4.$tn.1 "
+  execsql "INSERT INTO t1 VALUES $rows"
+  do_execsql_test 4.$tn.1 "
     ALTER TABLE t1 COLUMN $col SET TYPE $type;
-  " [list 1 "cannot change the type of column \"$col\" to \"$type\": that\
-changes its affinity, and the rows and index entries already stored were\
-written under the old one"]
-  do_execsql_test 4.$tn.2 {
     SELECT sql FROM sqlite_schema WHERE name='t1';
-  } [list [string trim $before]]
+  " [list [string trim $after]]
+  do_execsql_test 4.$tn.2 {
+    SELECT typeof(a)||':'||quote(a) FROM t1 ORDER BY b;
+  } $want
+  do_execsql_test 4.$tn.3 { PRAGMA integrity_check } {ok}
 }
+
+# The index over the column is rebuilt with it, so it still finds rows -
+# which is what a plain text edit could not have managed.
+#
+reset_db
+do_execsql_test 4.10.1 {
+  CREATE TABLE t1(a TEXT, b);
+  CREATE INDEX i1 ON t1(a);
+  INSERT INTO t1 VALUES('123','x'), ('456','y');
+  ALTER TABLE t1 COLUMN a SET TYPE INTEGER;
+  PRAGMA integrity_check;
+} {ok}
+do_execsql_test 4.10.2 {
+  SELECT count(*) FROM t1 INDEXED BY i1 WHERE a=123;
+  SELECT sql FROM sqlite_schema WHERE name='i1';
+} {1 {CREATE INDEX i1 ON t1(a)}}
+
+# Values that will not fit the new type stop the whole thing.
+#
+reset_db
+do_execsql_test 4.11.0 {
+  CREATE TABLE t1(a TEXT PRIMARY KEY, b);
+  INSERT INTO t1 VALUES('not-a-number','x');
+}
+do_catchsql_test 4.11.1 {
+  ALTER TABLE t1 COLUMN a SET TYPE INTEGER;
+} {1 {datatype mismatch}}
+do_execsql_test 4.11.2 {
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+  SELECT quote(a) FROM t1;
+} {{CREATE TABLE t1(a TEXT PRIMARY KEY, b)} 'not-a-number'}
+
+# A rebuild drops and recreates the table, which fires foreign key
+# actions, so it is refused while they are on - the same restriction SET
+# WITHOUT_ROWID carries, and the reason the published twelve-step rebuild
+# starts by disabling them.
+#
+reset_db
+do_execsql_test 4.12.0 {
+  PRAGMA foreign_keys = ON;
+  CREATE TABLE p1(x PRIMARY KEY);
+  CREATE TABLE t1(a TEXT, b REFERENCES p1(x));
+}
+do_catchsql_test 4.12.1 {
+  ALTER TABLE p1 COLUMN x SET TYPE INTEGER;
+} {1 {cannot rebuild p1 while foreign keys are enabled: table t1 refers to it}}
+# The affinity-preserving route needs no rebuild, so it is unaffected.
+#
+do_execsql_test 4.12.2 {
+  ALTER TABLE t1 COLUMN a SET TYPE CLOB;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a CLOB, b REFERENCES p1(x))}}
 
 #-------------------------------------------------------------------------
 # 5.*: the rowid alias.  INT and INTEGER share an affinity, but only
 # exactly INTEGER on the PRIMARY KEY of a rowid table makes the column an
-# alias for the rowid, so crossing that line is refused in both
-# directions.
+# alias for the rowid, so crossing that line carries the values between
+# the record and the rowid.
 #
-foreach {tn col type before} {
-  1 a INT     { CREATE TABLE t1(a INTEGER PRIMARY KEY, b) }
-  2 a INTEGER { CREATE TABLE t1(a INT PRIMARY KEY, b) }
-  3 a INT     { CREATE TABLE t1(a INTEGER PRIMARY KEY AUTOINCREMENT, b) }
-} {
-  reset_db
-  execsql $before
-  do_catchsql_test 5.$tn.1 "
-    ALTER TABLE t1 COLUMN $col SET TYPE $type;
-  " [list 1 "cannot change the type of PRIMARY KEY column \"$col\" to\
-\"$type\": only a column declared exactly INTEGER holds the rowid, so this\
-moves where its values live"]
-  do_execsql_test 5.$tn.2 {
-    SELECT sql FROM sqlite_schema WHERE name='t1';
-  } [list [string trim $before]]
+reset_db
+do_execsql_test 5.1.0 {
+  CREATE TABLE t1(a INTEGER PRIMARY KEY, b);
+  INSERT INTO t1 VALUES(7,'x'), (8,'y');
 }
+do_execsql_test 5.1.1 {
+  ALTER TABLE t1 COLUMN a SET TYPE TEXT;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+  SELECT typeof(a)||':'||quote(a) FROM t1 ORDER BY b;
+  PRAGMA integrity_check;
+} {{CREATE TABLE t1(a TEXT PRIMARY KEY, b)} text:'7' text:'8' ok}
 
-# Away from the PRIMARY KEY the same change is fine: nothing about the
-# rowid depends on it.
+# The other direction: the column becomes the rowid, and the automatic
+# index it needed while it was not goes away.
+#
+reset_db
+do_execsql_test 5.2.0 {
+  CREATE TABLE t1(a TEXT PRIMARY KEY, b);
+  INSERT INTO t1 VALUES('7','x');
+  SELECT count(*) FROM sqlite_schema WHERE type='index';
+} {1}
+do_execsql_test 5.2.1 {
+  ALTER TABLE t1 COLUMN a SET TYPE INTEGER;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+  SELECT typeof(a)||':'||quote(a) FROM t1;
+  SELECT count(*) FROM sqlite_schema WHERE type='index';
+  PRAGMA integrity_check;
+} {{CREATE TABLE t1(a INTEGER PRIMARY KEY, b)} integer:7 0 ok}
+
+# INT to INTEGER on a PRIMARY KEY is the same crossing.
+#
+reset_db
+do_execsql_test 5.3.1 {
+  CREATE TABLE t1(a INT PRIMARY KEY, b);
+  INSERT INTO t1 VALUES(7,'x');
+  ALTER TABLE t1 COLUMN a SET TYPE INTEGER;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+  SELECT typeof(a)||':'||quote(a) FROM t1;
+  PRAGMA integrity_check;
+} {{CREATE TABLE t1(a INTEGER PRIMARY KEY, b)} integer:7 ok}
+
+# Away from the PRIMARY KEY, INTEGER to INT is only a declaration and
+# takes the editing route.
 #
 reset_db
 do_execsql_test 5.4 {
   CREATE TABLE t1(a INTEGER, b);
+  CREATE INDEX i1 ON t1(a);
   INSERT INTO t1 VALUES(7, 'x');
   ALTER TABLE t1 COLUMN a SET TYPE INT;
-  SELECT sql FROM sqlite_schema WHERE name='t1';
+  SELECT sql FROM sqlite_schema ORDER BY name;
   SELECT quote(a) FROM t1;
-} {{CREATE TABLE t1(a INT, b)} 7}
+} {{CREATE INDEX i1 ON t1(a)} {CREATE TABLE t1(a INT, b)} 7}
 
-# And a PRIMARY KEY column that is not the rowid alias either way.
+# A PRIMARY KEY column that is not the rowid alias either way.
 #
 reset_db
 do_execsql_test 5.5 {
@@ -236,8 +329,8 @@ do_execsql_test 5.5 {
 } {{CREATE TABLE t1(a VARCHAR(9) PRIMARY KEY, b)} 'k' ok}
 
 #-------------------------------------------------------------------------
-# 6.*: the rows are not touched.  Nothing is rewritten, so the values and
-# their storage classes come back as they went in.
+# 6.*: on the editing route nothing is rewritten, so the values and their
+# storage classes come back exactly as they went in.
 #
 reset_db
 do_execsql_test 6.1 {
