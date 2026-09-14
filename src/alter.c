@@ -2741,92 +2741,11 @@ static int skipCreateTable(sqlite3_context *ctx, const u8 *zSql, int *piOff){
 }
 
 /*
-** Check that the statement stored for a table still describes the table
-** this connection has in memory.
-**
-** ALTER TABLE works from two sources at once.  It decides what to do from
-** the in-memory Table - that is what alterFindTable() and alterFindCol()
-** read - and it edits the text held in sqlite_schema.  The two are kept in
-** step by the schema cookie, which every DDL statement bumps and which
-** OP_Transaction checks against Schema.iGeneration.  Editing sqlite_schema
-** by hand under writable_schema bumps neither, so the two can disagree with
-** nothing to notice it.
-**
-** pNew is the table as just reparsed out of the stored text.  Compare it
-** against the live one of the same name: same number of columns, same names
-** in the same order.  A disagreement means the text being edited is not the
-** definition the command was planned against, so editing it further would
-** write out something nobody asked for.  Report corruption instead and let
-** the statement abort with the stored text untouched.
-*/
-static int alterStoredTableAgrees(sqlite3 *db, const char *zDb, Table *pNew){
-  Table *pLive;
-  int i;
-
-  if( pNew==0 || !IsOrdinaryTable(pNew) ) return SQLITE_CORRUPT_BKPT;
-  pLive = sqlite3FindTable(db, pNew->zName, zDb);
-  if( pLive==0 || !IsOrdinaryTable(pLive) ) return SQLITE_CORRUPT_BKPT;
-  if( pLive->nCol!=pNew->nCol ) return SQLITE_CORRUPT_BKPT;
-  for(i=0; i<pNew->nCol; i++){
-    if( sqlite3_stricmp(pLive->aCol[i].zCnName, pNew->aCol[i].zCnName) ){
-      return SQLITE_CORRUPT_BKPT;
-    }
-  }
-  return SQLITE_OK;
-}
-
-/*
-** Reparse the stored statement zSql, which belongs to schema ISCHEMA, and
-** check it against the live table with alterStoredTableAgrees().  Return
-** non-zero and set an error on ctx if it does not hold up.
-**
-** The editors that reparse anyway call alterStoredTableAgrees() directly on
-** the parse they already have.  This is for sqlite_drop_constraint(), which
-** finds its constraint by scanning and so has no parse of its own.
-*/
-static int alterCheckStoredTable(
-  sqlite3_context *ctx,   /* Function context, for the error */
-  int iSchema,            /* Schema the statement belongs to */
-  const char *zSql        /* The stored CREATE TABLE statement */
-){
-  sqlite3 *db = sqlite3_context_db_handle(ctx);
-  const char *zDb;
-  Parse sParse;
-  int rc;
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  sqlite3_xauth xAuth = db->xAuth;
-  db->xAuth = 0;
-#endif
-
-  if( zSql==0 || iSchema<0 || iSchema>=db->nDb ) return 0;
-  zDb = db->aDb[iSchema].zDbSName;
-  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
-  if( rc==SQLITE_OK ){
-    rc = alterStoredTableAgrees(db, zDb, sParse.pNewTable);
-  }else{
-    rc = SQLITE_CORRUPT_BKPT;
-  }
-  renameParseCleanup(&sParse);
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  db->xAuth = xAuth;
-#endif
-  if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
-    return 1;
-  }
-  return 0;
-}
-
-/*
 ** Internal SQL function sqlite3_drop_constraint():  Given an input
 ** CREATE TABLE statement, return a revised CREATE TABLE statement
 ** with a constraint removed.  Two forms, depending on the datatype
 ** of argv[2]:
 **
-**   sqlite_drop_constraint(ISCHEMA, SQL, INT)  -- Omit NOT NULL from the
-**                                                 INT-th column
-**   sqlite_drop_constraint(ISCHEMA, SQL, TEXT) -- Omit the constraint
-**                                                 named TEXT
 **
 ** In the first case, the left-most column is 0.
 */
@@ -2835,8 +2754,7 @@ static void dropConstraintFunc(
   int NotUsed,
   sqlite3_value **argv
 ){
-  int iSchema = sqlite3_value_int(argv[0]);
-  const u8 *zSql = sqlite3_value_text(argv[1]);
+  const u8 *zSql = sqlite3_value_text(argv[0]);
   const u8 *zCons = 0;
   int iNotNull = -1;
   int ii;
@@ -2850,18 +2768,13 @@ static void dropConstraintFunc(
 
   if( zSql==0 ) return;
 
-  /* This one finds the constraint by scanning rather than by reparsing, but
-  ** it still has to be looking at the right table.  Check the stored text
-  ** against the live one first, exactly as the reparsing editors do. */
-  if( alterCheckStoredTable(ctx, iSchema, (const char*)zSql) ) return;
-
   /* Jump past the "CREATE TABLE" bit. */
   if( skipCreateTable(ctx, zSql, &iOff) ) return;
 
-  if( sqlite3_value_type(argv[2])==SQLITE_INTEGER ){
-    iNotNull = sqlite3_value_int(argv[2]);
+  if( sqlite3_value_type(argv[1])==SQLITE_INTEGER ){
+    iNotNull = sqlite3_value_int(argv[1]);
   }else{
-    zCons = sqlite3_value_text(argv[2]);
+    zCons = sqlite3_value_text(argv[1]);
   }
 
   /* Search for the named constraint within column definitions. */
@@ -2962,6 +2875,15 @@ static void dropConstraintFunc(
   }
 }
 
+static int alterColumnIndex(Table *pTab, const char *zCol){
+  int i;
+  if( pTab==0 || zCol==0 ) return -1;
+  for(i=0; i<pTab->nCol; i++){
+    if( sqlite3_stricmp(pTab->aCol[i].zCnName, zCol)==0 ) return i;
+  }
+  return -1;
+}
+
 /*
 ** Internal SQL function:
 **
@@ -2990,12 +2912,13 @@ static void dropNotNullFunc(
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   int iSchema = sqlite3_value_int(argv[0]);
   const char *zSql = (const char*)sqlite3_value_text(argv[1]);
-  int iCol = sqlite3_value_int(argv[2]);
+  const char *zCol = (const char*)sqlite3_value_text(argv[2]);
   const char *zDb;
   Table *pTab;
   Parse sParse;
   char *zOut = 0;
   int nOut = 0;
+  int iCol;
   int rc;
 #ifndef SQLITE_OMIT_AUTHORIZATION
   sqlite3_xauth xAuth = db->xAuth;
@@ -3003,7 +2926,7 @@ static void dropNotNullFunc(
 #endif
 
   UNUSED_PARAMETER(NotUsed);
-  if( zSql==0 || iCol<0 || iSchema<0 || iSchema>=db->nDb ){
+  if( zSql==0 || zCol==0 || iSchema<0 || iSchema>=db->nDb ){
     rc = SQLITE_OK;
     goto drop_notnull_done;
   }
@@ -3017,12 +2940,16 @@ static void dropNotNullFunc(
     goto drop_notnull_cleanup;
   }
   pTab = sParse.pNewTable;
-  if( pTab==0 || iCol>=pTab->nCol ){
+  if( pTab==0 || !IsOrdinaryTable(pTab) ){
     rc = SQLITE_CORRUPT_BKPT;
     goto drop_notnull_cleanup;
   }
-  rc = alterStoredTableAgrees(db, zDb, pTab);
-  if( rc!=SQLITE_OK ) goto drop_notnull_cleanup;
+  iCol = alterColumnIndex(pTab, zCol);
+  if( iCol<0 ){
+    errorMPrintf(ctx, "no such column: %s", zCol);
+    rc = SQLITE_OK;
+    goto drop_notnull_cleanup;
+  }
 
   nOut = sqlite3Strlen30(zSql);
   zOut = sqlite3DbMallocRaw(db, (i64)nOut+1);
@@ -3118,12 +3045,13 @@ static void insertConstraintFunc(
   int iSchema = sqlite3_value_int(argv[0]);
   const char *zSql = (const char*)sqlite3_value_text(argv[1]);
   const char *zCons = (const char*)sqlite3_value_text(argv[2]);
-  int iCol = sqlite3_value_int(argv[3]);
+  const char *zCol = (const char*)sqlite3_value_text(argv[3]);
   const char *zDb;
   Table *pTab;
   Parse sParse;
   char *zNew;
   int iOff;
+  int iCol;
   int rc;
 #ifndef SQLITE_OMIT_AUTHORIZATION
   sqlite3_xauth xAuth = db->xAuth;
@@ -3145,12 +3073,20 @@ static void insertConstraintFunc(
     goto insert_cons_cleanup;
   }
   pTab = sParse.pNewTable;
-  if( pTab==0 || !IsOrdinaryTable(pTab) || iCol>=pTab->nCol ){
+  if( pTab==0 || !IsOrdinaryTable(pTab) ){
     rc = SQLITE_CORRUPT_BKPT;
     goto insert_cons_cleanup;
   }
-  rc = alterStoredTableAgrees(db, zDb, pTab);
-  if( rc!=SQLITE_OK ) goto insert_cons_cleanup;
+  if( zCol==0 ){
+    iCol = -1;
+  }else{
+    iCol = alterColumnIndex(pTab, zCol);
+    if( iCol<0 ){
+      errorMPrintf(ctx, "no such column: %s", zCol);
+      rc = SQLITE_OK;
+      goto insert_cons_cleanup;
+    }
+  }
 
   if( iCol<0 ){
     if( sParse.zConsIns==0 ){
@@ -3297,12 +3233,16 @@ void sqlite3AlterDropConstraint(
 
   if( pCons ){
     char *z = sqlite3NameFromToken(db, pCons);
-    zArg = sqlite3MPrintf(db, "sqlite_drop_constraint(%d, sql, %Q)", iDb, z);
+    zArg = sqlite3MPrintf(db, "sqlite_drop_constraint(sql, %Q)", z);
     sqlite3DbFree(db, z);
   }else{
     int iCol;
+    char *zCol;
     if( alterFindCol(pParse, pTab, pCol, &iCol) ) return;
-    zArg = sqlite3MPrintf(db, "sqlite_drop_notnull(%d, sql, %d)", iDb, iCol);
+    zCol = sqlite3NameFromToken(db, pCol);
+    if( zCol==0 ) return;
+    zArg = sqlite3MPrintf(db, "sqlite_drop_notnull(%d, sql, %Q)", iDb, zCol);
+    sqlite3DbFree(db, zCol);
   }
 
   /* Edit the SQL for the named table. */
@@ -3389,6 +3329,7 @@ void sqlite3AlterSetNotNull(
   int iDb = 0;
   const char *zDb = 0;
   const char *pCons = 0;
+  char *zCol = 0;
   int nCons = 0;
 
   /* Look up the table being altered. */
@@ -3400,6 +3341,8 @@ void sqlite3AlterSetNotNull(
   if( alterFindCol(pParse, pTab, pCol, &iCol) ){
     return;
   }
+  zCol = sqlite3NameFromToken(pParse->db, pCol);
+  if( zCol==0 ) return;
 
   /* Find the length in bytes of the constraint definition */
   pCons = pFirst->z;
@@ -3416,10 +3359,11 @@ void sqlite3AlterSetNotNull(
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
       "sql = sqlite_insert_constraint(%d, "
-              "sqlite_drop_notnull(%d, sql, %d), %.*Q, %d) "
+              "sqlite_drop_notnull(%d, sql, %Q), %.*Q, %Q) "
       "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iDb, iDb, iCol, nCons, pCons, iCol, pTab->zName
+      , zDb, iDb, iDb, zCol, nCons, pCons, zCol, pTab->zName
   );
+  sqlite3DbFree(pParse->db, zCol);
 
   /* Finally, reload the database schema. */
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
@@ -3540,7 +3484,7 @@ void sqlite3AlterAddConstraint(
 
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_insert_constraint(%d, sql, %.*Q, -1) "
+      "sql = sqlite_insert_constraint(%d, sql, %.*Q, NULL) "
       "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
       , zDb, iDb, nCons, pCons, pTab->zName
   );
@@ -3568,7 +3512,7 @@ static void alterAddConstraintText(
   const char *zName,    /* Name of the new constraint */
   const char *zCons,    /* Text of the constraint to store */
   int nCons,            /* Bytes of zCons to use */
-  int iCol              /* Column to attach it to, or -1 for the table */
+  const char *zCol      /* Column to attach it to, or 0 for the table */
 ){
   sqlite3NestedParse(pParse,
       "SELECT sqlite_fail('constraint %q already exists', %d) "
@@ -3580,9 +3524,9 @@ static void alterAddConstraintText(
 
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_insert_constraint(%d, sql, %.*Q, %d) "
+      "sql = sqlite_insert_constraint(%d, sql, %.*Q, %Q) "
       "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iDb, nCons, zCons, iCol, pTab->zName
+      , zDb, iDb, nCons, zCons, zCol, pTab->zName
   );
 
   renameReloadSchema(pParse, iDb, INITFLAG_AlterAddCons);
@@ -3711,7 +3655,7 @@ void sqlite3AlterAddNamedConstraint(
   nCons = alterRtrimConstraint(db, zCons, pParse->sLastToken.z - zCons);
 
   if( eType==ALTERCONS_ForeignKey ){
-    alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, -1);
+    alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, 0);
 
     /* Emitted after the reload above, so that foreign_key_check sees the
     ** key that was just added. */
@@ -3756,7 +3700,7 @@ void sqlite3AlterAddNamedConstraint(
     );
     sqlite3DbFree(db, zIdx);
 
-    alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, -1);
+    alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, 0);
   }
 
 add_named_cons_exit:
@@ -3833,7 +3777,7 @@ void sqlite3AlterAddDefault(
   if( zCons==0 ) goto add_default_exit;
 
   alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons,
-                         sqlite3Strlen30(zCons), iCol);
+                         sqlite3Strlen30(zCons), pTabCol->zCnName);
 
 add_default_exit:
   sqlite3ExprDelete(db, pExpr);
@@ -3851,7 +3795,7 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_rename_test,    7, renameTableTest),
     INTERNAL_FUNCTION(sqlite_drop_column,    3, dropColumnFunc),
     INTERNAL_FUNCTION(sqlite_rename_quotefix,2, renameQuotefixFunc),
-    INTERNAL_FUNCTION(sqlite_drop_constraint,3, dropConstraintFunc),
+    INTERNAL_FUNCTION(sqlite_drop_constraint,2, dropConstraintFunc),
     INTERNAL_FUNCTION(sqlite_drop_notnull,   3, dropNotNullFunc),
     INTERNAL_FUNCTION(sqlite_fail,           2, failConstraintFunc),
     INTERNAL_FUNCTION(sqlite_insert_constraint,4,insertConstraintFunc),
