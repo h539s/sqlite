@@ -718,7 +718,7 @@ static int authFunctions(Walker *pWalker, Expr *p){
   }
   return WRC_Continue;
 }
-static void sqlite3FuncAuth(Parse *pParse, Expr *pExpr){
+void sqlite3FuncAuth(Parse *pParse, Expr *pExpr){
   Walker w;
   memset(&w, 0, sizeof(w));
   w.xExprCallback = authFunctions;

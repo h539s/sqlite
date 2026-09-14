@@ -4313,6 +4313,7 @@ typedef struct {
 #define INITFLAG_AlterDrop     0x0002  /* Reparse after a DROP COLUMN */
 #define INITFLAG_AlterAdd      0x0003  /* Reparse after an ADD COLUMN */
 #define INITFLAG_AlterDropCons 0x0004  /* Reparse after a DROP CONSTRAINT */
+#define INITFLAG_AlterAddCons  0x0005  /* Reparse after an ADD CONSTRAINT */
 
 /* Tuning parameters are set using SQLITE_TESTCTRL_TUNE and are controlled
 ** on debug-builds of the CLI using ".testctrl tune ID VALUE".  Tuning
@@ -5113,6 +5114,9 @@ void sqlite3AddNotNull(Parse*, int, const char*, const char*);
 void sqlite3AddPrimaryKey(Parse*, ExprList*, int, int, int);
 void sqlite3AddCheckConstraint(Parse*, Expr*, const char*, const char*);
 void sqlite3AddDefaultValue(Parse*,Expr*,const char*,const char*);
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  void sqlite3FuncAuth(Parse*,Expr*);
+#endif
 void sqlite3AddCollateType(Parse*, Token*);
 void sqlite3AddGenerated(Parse*,Expr*,Token*);
 void sqlite3EndTable(Parse*,Token*,Token*,u32,Select*);
@@ -5605,6 +5609,14 @@ void sqlite3ColumnDefault(Vdbe *, Table *, int, int);
 void sqlite3AlterFinishAddColumn(Parse *, Token *);
 void sqlite3AlterBeginAddColumn(Parse *, SrcList *);
 void sqlite3AlterDropColumn(Parse*, SrcList*, const Token*);
+void sqlite3AlterAddNamedConstraint(Parse*,SrcList*,Token*,Token*,int,
+                                    ExprList*,const char*,int);
+void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Token*,Token*,Expr*,
+                            const char*,const char*);
+/* Allowed values for the eType parameter of sqlite3AlterAddNamedConstraint() */
+#define ALTERCONS_Unique      1
+#define ALTERCONS_PrimaryKey  2
+#define ALTERCONS_ForeignKey  3
 void sqlite3NotNullLocAdd(Parse*, int, const char*, const char*);
 void sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
