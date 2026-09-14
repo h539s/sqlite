@@ -2936,6 +2936,35 @@ static int alterColumnIndex(Table *pTab, const char *zCol){
   return -1;
 }
 
+static int alterExciseClause(
+  char *zOut,             /* Statement being edited, in place */
+  int nOut,               /* Current length of zOut */
+  const char *zSql,       /* The original text the extents point into */
+  const Token *pLoc       /* Extent of the clause to remove */
+){
+  int iStart = (int)(pLoc->z - zSql);
+  int iEnd = iStart + (int)pLoc->n;
+  int t = 0;
+
+  assert( iStart>=0 && iEnd<=nOut );
+  iEnd += getWhitespace((const u8*)&zOut[iEnd]);
+  sqlite3GetToken((const u8*)&zOut[iEnd], &t);
+  while( iStart>0 && sqlite3Isspace(zOut[iStart-1]) ) iStart--;
+  if( t==TK_RP || t==TK_COMMA ){
+    if( iStart>0 && zOut[iStart-1]==',' ){
+      iStart--;
+      while( iStart>0 && sqlite3Isspace(zOut[iStart-1]) ) iStart--;
+    }
+  }else{
+    zOut[iStart] = ' ';
+    iStart++;
+  }
+  assert( iStart<=iEnd );
+
+  memmove(&zOut[iStart], &zOut[iEnd], (size_t)(nOut-iEnd)+1);
+  return nOut - (iEnd - iStart);
+}
+
 /*
 ** Shared implementation of the internal SQL functions
 **
@@ -3023,8 +3052,6 @@ static void dropColConsFunc(
   while( 1 ){
     ParseLoc *p;
     ParseLoc *pBest = 0;
-    int iStart, iEnd;
-    int t = 0;
 
     for(p=sParse.pLoc; p; p=p->pNext){
       if( p->eType!=eType || p->iCol!=iCol ) continue;
@@ -3032,31 +3059,7 @@ static void dropColConsFunc(
     }
     if( pBest==0 ) break;
     pBest->iCol = -1;
-
-    iStart = (int)(pBest->t.z - zSql);
-    iEnd = iStart + (int)pBest->t.n;
-    assert( iStart>=0 && iEnd<=nOut );
-
-    /* Absorb any whitespace and comments that follow the constraint, and
-    ** the whitespace that precedes it.  If what comes next closes the
-    ** column definition, the two neighbours can simply abut: "a INT NOT
-    ** NULL, b" becomes "a INT, b" and not "a INT , b".  Otherwise exactly
-    ** one space is left behind to keep them apart.  The same applies to
-    ** "a INT DEFAULT 5, b".
-    **
-    ** Comments in front of the constraint are deliberately left alone.
-    ** They belong to the column, not to the constraint being dropped. */
-    iEnd += getWhitespace((const u8*)&zOut[iEnd]);
-    sqlite3GetToken((const u8*)&zOut[iEnd], &t);
-    while( iStart>0 && sqlite3Isspace(zOut[iStart-1]) ) iStart--;
-    if( t!=TK_RP && t!=TK_COMMA ){
-      zOut[iStart] = ' ';
-      iStart++;
-    }
-    assert( iStart<=iEnd );
-
-    memmove(&zOut[iStart], &zOut[iEnd], (size_t)(nOut-iEnd)+1);
-    nOut -= (iEnd - iStart);
+    nOut = alterExciseClause(zOut, nOut, zSql, &pBest->t);
   }
 
   sqlite3_result_text(ctx, zOut, nOut, SQLITE_TRANSIENT);
@@ -3917,8 +3920,6 @@ static void dropPkFunc(
   Parse sParse;
   char *zOut = 0;
   int nOut = 0;
-  int iStart, iEnd;
-  int t = 0;
   int rc;
 #ifndef SQLITE_OMIT_AUTHORIZATION
   sqlite3_xauth xAuth = db->xAuth;
@@ -3959,30 +3960,7 @@ static void dropPkFunc(
   }
   memcpy(zOut, zSql, (size_t)nOut+1);
 
-  iStart = (int)(p->t.z - zSql);
-  iEnd = iStart + (int)p->t.n;
-  assert( iStart>=0 && iEnd<=nOut );
-
-  /* Absorb the whitespace and comments on either side of the clause.  If
-  ** what comes next closes the list or separates it, the neighbours can
-  ** abut, and the comma in front of the clause belongs to it.  Otherwise a
-  ** single space is left behind to keep the neighbours apart. */
-  iEnd += getWhitespace((const u8*)&zOut[iEnd]);
-  sqlite3GetToken((const u8*)&zOut[iEnd], &t);
-  while( iStart>0 && sqlite3Isspace(zOut[iStart-1]) ) iStart--;
-  if( t==TK_RP || t==TK_COMMA ){
-    if( iStart>0 && zOut[iStart-1]==',' ){
-      iStart--;
-      while( iStart>0 && sqlite3Isspace(zOut[iStart-1]) ) iStart--;
-    }
-  }else{
-    zOut[iStart] = ' ';
-    iStart++;
-  }
-  assert( iStart<=iEnd );
-
-  memmove(&zOut[iStart], &zOut[iEnd], (size_t)(nOut-iEnd)+1);
-  nOut -= (iEnd - iStart);
+  nOut = alterExciseClause(zOut, nOut, zSql, &p->t);
   sqlite3_result_text(ctx, zOut, nOut, SQLITE_TRANSIENT);
 
 drop_pk_cleanup:
