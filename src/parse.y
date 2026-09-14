@@ -398,23 +398,31 @@ ccons ::= CONSTRAINT(C) nm(X). {
   pParse->u1.cr.zConsKw = C.z;
   pParse->u1.cr.zConsEnd = &X.z[X.n];
 }
-ccons ::= DEFAULT scantok(A) term(X).
-                            {sqlite3AddDefaultValue(pParse,X,A.z,&A.z[A.n]);}
-ccons ::= DEFAULT LP(A) expr(X) RP(Z).
-                            {sqlite3AddDefaultValue(pParse,X,A.z+1,Z.z);}
-ccons ::= DEFAULT PLUS(A) scantok(Z) term(X).
-                            {sqlite3AddDefaultValue(pParse,X,A.z,&Z.z[Z.n]);}
-ccons ::= DEFAULT MINUS(A) scantok(Z) term(X). {
+ccons ::= DEFAULT(D) scantok(A) term(X). {
+  sqlite3AddDefaultValue(pParse,X,A.z,&A.z[A.n]);
+  if( IN_RENAME_OBJECT ) sqlite3DefaultLocAdd(pParse, &D);
+}
+ccons ::= DEFAULT(D) LP(A) expr(X) RP(Z). {
+  sqlite3AddDefaultValue(pParse,X,A.z+1,Z.z);
+  if( IN_RENAME_OBJECT ) sqlite3DefaultLocAdd(pParse, &D);
+}
+ccons ::= DEFAULT(D) PLUS(A) scantok(Z) term(X). {
+  sqlite3AddDefaultValue(pParse,X,A.z,&Z.z[Z.n]);
+  if( IN_RENAME_OBJECT ) sqlite3DefaultLocAdd(pParse, &D);
+}
+ccons ::= DEFAULT(D) MINUS(A) scantok(Z) term(X). {
   Expr *p = sqlite3PExpr(pParse, TK_UMINUS, X, 0);
   sqlite3AddDefaultValue(pParse,p,A.z,&Z.z[Z.n]);
+  if( IN_RENAME_OBJECT ) sqlite3DefaultLocAdd(pParse, &D);
 }
-ccons ::= DEFAULT scantok id(X).       {
+ccons ::= DEFAULT(D) scantok id(X).       {
   Expr *p = tokenExpr(pParse, TK_STRING, X);
   if( p ){
     sqlite3ExprIdToTrueFalse(p);
     testcase( p->op==TK_TRUEFALSE && sqlite3ExprTruthValue(p) );
   }
     sqlite3AddDefaultValue(pParse,p,X.z,X.z+X.n);
+  if( IN_RENAME_OBJECT ) sqlite3DefaultLocAdd(pParse, &D);
 }
 
 // In addition to the type name, we also care about the primary key and
@@ -1941,6 +1949,9 @@ cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT nm(Y). {
 // still names a constraint; only the two words together mean the key.
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT PRIMARY KEY. {
   sqlite3AlterDropPrimaryKey(pParse, X);
+}
+cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT DEFAULT nm(Y). {
+  sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_default");
 }
 cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) DROP NOT NULL. {
   sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_notnull");
