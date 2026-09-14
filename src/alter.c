@@ -2981,42 +2981,79 @@ drop_notnull_done:
 ** SQL that adds CONSTRAINT-TEXT at the end of the ICOL-th column
 ** definition.  (The left-most column defintion is 0.)
 */
-static void addConstraintFunc(
+static void insertConstraintFunc(
   sqlite3_context *ctx,
   int NotUsed,
   sqlite3_value **argv
 ){
-  const u8 *zSql = sqlite3_value_text(argv[0]);
-  const char *zCons = (const char*)sqlite3_value_text(argv[1]);
-  int iCol = sqlite3_value_int(argv[2]);
-  int iOff = 0;
-  int ii;
-  sqlite3_str *pNew;
-  int t = 0;
-  UNUSED_PARAMETER(NotUsed);
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  int iSchema = sqlite3_value_int(argv[0]);
+  const char *zSql = (const char*)sqlite3_value_text(argv[1]);
+  const char *zCons = (const char*)sqlite3_value_text(argv[2]);
+  int iCol = sqlite3_value_int(argv[3]);
+  const char *zDb;
+  Table *pTab;
+  Parse sParse;
+  char *zNew;
+  int iOff;
+  int rc;
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  sqlite3_xauth xAuth = db->xAuth;
+  db->xAuth = 0;
+#endif
 
-  if( skipCreateTable(ctx, zSql, &iOff) ) return;
-  
-  for(ii=0; ii<=iCol || (iCol<0 && t!=TK_RP); ii++){
-    iOff += getConstraintToken(&zSql[iOff], &t);
-    while( 1 ){
-      int nTok = getConstraintToken(&zSql[iOff], &t);
-      if( t==TK_COMMA || t==TK_RP ) break;
-      if( t==TK_ILLEGAL ){
-        sqlite3_result_error_code(ctx, SQLITE_CORRUPT_BKPT);
-        return;
-      }
-      iOff += nTok;
-    }
+  UNUSED_PARAMETER(NotUsed);
+  if( zSql==0 || zCons==0 || iSchema<0 || iSchema>=db->nDb ){
+    rc = SQLITE_OK;
+    goto insert_cons_done;
+  }
+  zDb = db->aDb[iSchema].zDbSName;
+
+  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
+  if( rc!=SQLITE_OK ) goto insert_cons_cleanup;
+  pTab = sParse.pNewTable;
+  if( pTab==0 || !IsOrdinaryTable(pTab) || iCol>=pTab->nCol ){
+    /* This can happen if the sqlite_schema table is corrupt */
+    rc = SQLITE_CORRUPT_BKPT;
+    goto insert_cons_cleanup;
   }
 
-  iOff += getWhitespace(&zSql[iOff]);
+  if( iCol<0 ){
+    if( sParse.zConsIns==0 ){
+      rc = SQLITE_CORRUPT_BKPT;
+      goto insert_cons_cleanup;
+    }
+    iOff = notNullRtrim(zSql, sParse.zConsIns);
+    zNew = sqlite3MPrintf(db, "%.*s, %s%s", iOff, zSql, zCons, &zSql[iOff]);
+  }else{
+    ParseLoc *p;
+    for(p=sParse.pLoc; p; p=p->pNext){
+      if( p->eType==PARSELOC_ColDef && p->iCol==iCol ) break;
+    }
+    if( p==0 ){
+      rc = SQLITE_CORRUPT_BKPT;
+      goto insert_cons_cleanup;
+    }
+    iOff = (int)(p->t.z - zSql);
+    zNew = sqlite3MPrintf(db, "%.*s %s%s", iOff, zSql, zCons, &zSql[iOff]);
+  }
+  if( zNew==0 ){
+    rc = SQLITE_NOMEM_BKPT;
+    goto insert_cons_cleanup;
+  }
+  sqlite3_result_text(ctx, zNew, -1, SQLITE_TRANSIENT);
+  sqlite3DbFree(db, zNew);
 
-  pNew = sqlite3_str_new(sqlite3_context_db_handle(ctx));
-  sqlite3_str_append(pNew, (const char*)zSql, iOff);
-  if( iCol<0 ) sqlite3_str_append(pNew, ",", 1);
-  sqlite3_str_appendf(pNew, " %s%s", zCons, &zSql[iOff]);
-  sqlite3_result_str(ctx, pNew, SQLITE_FINISH);
+insert_cons_cleanup:
+  renameParseCleanup(&sParse);
+
+insert_cons_done:
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  db->xAuth = xAuth;
+#endif
+  if( rc!=SQLITE_OK ){
+    sqlite3_result_error_code(ctx, rc);
+  }
 }
 
 /*
@@ -3244,10 +3281,10 @@ void sqlite3AlterSetNotNull(
   /* Edit the SQL for the named table. */
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_add_constraint("
+      "sql = sqlite_insert_constraint(%d, "
               "sqlite_drop_notnull(%d, sql, %d), %.*Q, %d) "
       "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iDb, iCol, nCons, pCons, iCol, pTab->zName
+      , zDb, iDb, iDb, iCol, nCons, pCons, iCol, pTab->zName
   );
 
   /* Finally, reload the database schema. */
@@ -3369,9 +3406,9 @@ void sqlite3AlterAddConstraint(
 
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_add_constraint(sql, %.*Q, -1) "
+      "sql = sqlite_insert_constraint(%d, sql, %.*Q, -1) "
       "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, nCons, pCons, pTab->zName
+      , zDb, iDb, nCons, pCons, pTab->zName
   );
 
   /* Finally, reload the database schema. */
@@ -3391,7 +3428,7 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_drop_constraint,2, dropConstraintFunc),
     INTERNAL_FUNCTION(sqlite_drop_notnull,   3, dropNotNullFunc),
     INTERNAL_FUNCTION(sqlite_fail,           2, failConstraintFunc),
-    INTERNAL_FUNCTION(sqlite_add_constraint, 3, addConstraintFunc),
+    INTERNAL_FUNCTION(sqlite_insert_constraint,4,insertConstraintFunc),
     INTERNAL_FUNCTION(sqlite_find_constraint,2, findConstraintFunc),
   };
   sqlite3InsertBuiltinFuncs(aAlterTableFuncs, ArraySize(aAlterTableFuncs));
