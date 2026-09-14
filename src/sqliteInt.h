@@ -4314,6 +4314,7 @@ typedef struct {
 #define INITFLAG_AlterAdd      0x0003  /* Reparse after an ADD COLUMN */
 #define INITFLAG_AlterDropCons 0x0004  /* Reparse after a DROP CONSTRAINT */
 #define INITFLAG_AlterAddCons  0x0005  /* Reparse after an ADD CONSTRAINT */
+#define INITFLAG_AlterSetOpt   0x0006  /* Reparse after SET <table-option> */
 
 /* Tuning parameters are set using SQLITE_TESTCTRL_TUNE and are controlled
 ** on debug-builds of the CLI using ".testctrl tune ID VALUE".  Tuning
@@ -5584,6 +5585,7 @@ void sqlite3AlterAddConstraint(
   Expr *pExpr              /* The parsed CHECK expression */
 );
 void sqlite3AlterSetNotNull(Parse*, SrcList*, Token*, Token*);
+void sqlite3AlterSetTableOption(Parse*, SrcList*, Token*);
 i64 sqlite3GetToken(const unsigned char *, int *);
 void sqlite3NestedParse(Parse*, const char*, ...);
 void sqlite3ExpirePreparedStatements(sqlite3*, int);

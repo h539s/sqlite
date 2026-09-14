@@ -603,7 +603,8 @@ static int isRealTable(Parse *pParse, Table *pTab, int iOp){
 #endif
   if( zType ){
     const char *azMsg[] = {
-      "rename columns of", "drop column from", "edit constraints of"
+      "rename columns of", "drop column from", "edit constraints of",
+      "set table options on"
     };
     assert( iOp>=0 && iOp<ArraySize(azMsg) );
     sqlite3ErrorMsg(pParse, "cannot %s %s \"%s\"",
@@ -3202,7 +3203,8 @@ static Table *alterFindTable(
   SrcList *pSrc,        /* Name of the table to look for */
   int *piDb,            /* OUT: write the iDb here */
   const char **pzDb,    /* OUT: write name of schema here */
-  int bAuth             /* Do ALTER TABLE authorization checks if true */
+  int bAuth,            /* Do ALTER TABLE authorization checks if true */
+  int iOp               /* isRealTable() operation code for error messages */
 ){
   sqlite3 *db = pParse->db;
   Table *pTab = 0;
@@ -3213,7 +3215,7 @@ static Table *alterFindTable(
     *pzDb = db->aDb[iDb].zDbSName;
     *piDb = iDb;
 
-    if( SQLITE_OK!=isRealTable(pParse, pTab, 2) 
+    if( SQLITE_OK!=isRealTable(pParse, pTab, iOp) 
      || SQLITE_OK!=isAlterableTable(pParse, pTab) 
     ){
       pTab = 0;
@@ -3252,7 +3254,7 @@ void sqlite3AlterDropConstraint(
 
   assert( (pCol==0)!=(pCons==0) );
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, pCons!=0);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, pCons!=0, 2);
   if( !pTab ) return;
 
   if( pCons ){
@@ -3361,7 +3363,7 @@ void sqlite3AlterSetNotNull(
 
   /* Look up the table being altered. */
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0, 2);
   if( !pTab ) return;
 
   /* Find the column being altered.  alterFindCol() authorizes the change and
@@ -3472,7 +3474,7 @@ void sqlite3AlterAddConstraint(
 
   /* Look up the table being altered. */
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
   if( !pTab ){
     sqlite3ExprDelete(pParse->db, pExpr);
     return;
@@ -3657,7 +3659,7 @@ void sqlite3AlterAddNamedConstraint(
   assert( eType==ALTERCONS_Unique || eType==ALTERCONS_PrimaryKey
        || eType==ALTERCONS_ForeignKey );
 
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
   if( pTab==0 ) goto add_named_cons_exit;
 
   if( eType==ALTERCONS_PrimaryKey ){
@@ -3771,7 +3773,7 @@ void sqlite3AlterAddDefault(
   char *zCons = 0;
 
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
   if( pTab==0 ) goto add_default_exit;
   if( alterFindCol(pParse, pTab, pCol, &iCol) ) goto add_default_exit;
 
@@ -3974,7 +3976,7 @@ void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
   const char *zDb = 0;
 
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
   if( pTab==0 ) return;
 
   if( (pTab->tabFlags & TF_HasPrimaryKey)==0 ){
@@ -4044,6 +4046,95 @@ void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
 }
 
+static void setStrictFunc(
+  sqlite3_context *ctx,
+  int NotUsed,
+  sqlite3_value **argv
+){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  const char *zSql = (const char*)sqlite3_value_text(argv[0]);
+  int bSep = sqlite3_value_int(argv[1]);
+  int nSql;
+  char *zNew;
+
+  UNUSED_PARAMETER(NotUsed);
+  if( zSql==0 ) return;
+
+  nSql = alterRtrimConstraint(db, zSql, sqlite3Strlen30(zSql));
+  if( nSql<=0 ){
+    sqlite3_result_error_code(ctx, db->mallocFailed ? SQLITE_NOMEM
+                                                    : SQLITE_CORRUPT_BKPT);
+    return;
+  }
+
+  zNew = sqlite3MPrintf(db, "%.*s%s STRICT", nSql, zSql, bSep ? "," : "");
+  if( zNew==0 ){
+    sqlite3_result_error_nomem(ctx);
+    return;
+  }
+  sqlite3_result_text(ctx, zNew, -1, SQLITE_DYNAMIC);
+}
+
+void sqlite3AlterSetTableOption(
+  Parse *pParse,    /* Parsing context */
+  SrcList *pSrc,    /* The table being altered */
+  Token *pOpt       /* Name of the table-option being turned on */
+){
+  Table *pTab = 0;
+  int iDb = 0;
+  const char *zDb = 0;
+  int ii;
+
+  assert( pSrc->nSrc==1 );
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 3);
+  if( !pTab ) return;
+
+  if( pOpt->n!=6 || sqlite3_strnicmp(pOpt->z, "strict", 6)!=0 ){
+    sqlite3ErrorMsg(pParse, "unknown table option: %.*s", pOpt->n, pOpt->z);
+    return;
+  }
+
+  if( pTab->tabFlags & TF_Strict ) return;
+
+  assert( IsOrdinaryTable(pTab) );
+  for(ii=0; ii<pTab->nCol; ii++){
+    Column *pCol = &pTab->aCol[ii];
+    if( pCol->eCType==COLTYPE_CUSTOM ){
+      if( pCol->colFlags & COLFLAG_HASTYPE ){
+        sqlite3ErrorMsg(pParse, "unknown datatype for %s.%s: \"%s\"",
+            pTab->zName, pCol->zCnName, sqlite3ColumnType(pCol, "")
+        );
+      }else{
+        sqlite3ErrorMsg(pParse, "missing datatype for %s.%s",
+            pTab->zName, pCol->zCnName
+        );
+      }
+      return;
+    }
+  }
+
+  sqlite3MayAbort(pParse);
+
+  sqlite3NestedParse(pParse,
+      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
+      "sql = sqlite_set_strict(sql, %d) "
+      "WHERE type='table' AND name=%Q COLLATE nocase"
+      , zDb, (pTab->tabFlags & TF_WithoutRowid)!=0, pTab->zName
+  );
+
+  renameReloadSchema(pParse, iDb, INITFLAG_AlterSetOpt);
+
+  /* (2) and (3): search for a row that the new definition rejects. */
+  pParse->colNamesSet = 1;
+  sqlite3NestedParse(pParse,
+      "SELECT sqlite_fail('cannot set STRICT on %q: ' || quick_check, %d) "
+      "FROM pragma_quick_check(%Q,%Q) "
+      "WHERE quick_check GLOB 'non-* value in*' "
+      "OR quick_check GLOB 'NULL value in*'",
+      pTab->zName, SQLITE_CONSTRAINT, pTab->zName, zDb
+  );
+}
+
 /*
 ** Register built-in functions used to help implement ALTER TABLE
 */
@@ -4060,6 +4151,7 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_fail,           2, failConstraintFunc),
     INTERNAL_FUNCTION(sqlite_insert_constraint,4,insertConstraintFunc),
     INTERNAL_FUNCTION(sqlite_find_constraint,2, findConstraintFunc),
+    INTERNAL_FUNCTION(sqlite_set_strict,     2, setStrictFunc),
   };
   sqlite3InsertBuiltinFuncs(aAlterTableFuncs, ArraySize(aAlterTableFuncs));
 }
