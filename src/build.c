@@ -1698,7 +1698,7 @@ void sqlite3AddNotNull(
   ** hunt for it with a lexical scan.  Only done for the reparse of a
   ** stored CREATE TABLE statement - see renameParseSql().  */
   if( IN_RENAME_OBJECT ){
-    sqlite3NotNullLocAdd(pParse, p->nCol-1, zStart, zEnd);
+    sqlite3ConsLocAdd(pParse, PARSELOC_NotNull, p->nCol-1, zStart, zEnd);
   }
 
   /* Set the uniqNotNull flag on any UNIQUE or PK indexes already created
@@ -4707,6 +4707,21 @@ void sqlite3DefaultRowEst(Index *pIdx){
   if( IsUniqueIndex(pIdx) ) a[pIdx->nKeyCol] = 0;
 }
 
+void sqlite3CodeDropIndex(Parse *pParse, Index *pIndex, int iDb){
+  sqlite3 *db = pParse->db;
+  Vdbe *v = sqlite3GetVdbe(pParse);
+  if( v==0 ) return;
+  sqlite3BeginWriteOperation(pParse, 1, iDb);
+  sqlite3NestedParse(pParse,
+     "DELETE FROM %Q." LEGACY_SCHEMA_TABLE " WHERE name=%Q AND type='index'",
+     db->aDb[iDb].zDbSName, pIndex->zName
+  );
+  sqlite3ClearStatTables(pParse, iDb, "idx", pIndex->zName);
+  sqlite3ChangeCookie(pParse, iDb);
+  destroyRootPage(pParse, pIndex->tnum, iDb);
+  sqlite3VdbeAddOp4(v, OP_DropIndex, iDb, 0, 0, pIndex->zName, 0);
+}
+
 /*
 ** This routine will drop an existing named index.  This routine
 ** implements the DROP INDEX statement.
@@ -4762,18 +4777,7 @@ void sqlite3DropIndex(Parse *pParse, SrcList *pName, int ifExists){
 #endif
 
   /* Generate code to remove the index and from the schema table */
-  v = sqlite3GetVdbe(pParse);
-  if( v ){
-    sqlite3BeginWriteOperation(pParse, 1, iDb);
-    sqlite3NestedParse(pParse,
-       "DELETE FROM %Q." LEGACY_SCHEMA_TABLE " WHERE name=%Q AND type='index'",
-       db->aDb[iDb].zDbSName, pIndex->zName
-    );
-    sqlite3ClearStatTables(pParse, iDb, "idx", pIndex->zName);
-    sqlite3ChangeCookie(pParse, iDb);
-    destroyRootPage(pParse, pIndex->tnum, iDb);
-    sqlite3VdbeAddOp4(v, OP_DropIndex, iDb, 0, 0, pIndex->zName, 0);
-  }
+  sqlite3CodeDropIndex(pParse, pIndex, iDb);
 
 exit_drop_index:
   sqlite3SrcListDelete(db, pName);

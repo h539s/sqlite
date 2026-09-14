@@ -2518,11 +2518,12 @@ static int notNullRtrim(const char *zStart, const char *zEnd){
 ** comments, then the name is part of this constraint and the extent is
 ** widened to the left to take it in.
 */
-void sqlite3NotNullLocAdd(
+void sqlite3ConsLocAdd(
   Parse *pParse,        /* Parsing context */
-  int iCol,             /* Index of the column being constrained */
-  const char *zStart,   /* First byte of the "NOT" keyword */
-  const char *zEnd      /* First byte past the "NULL" keyword */
+  u8 eType,             /* PARSELOC_NotNull or PARSELOC_PrimaryKey */
+  int iCol,             /* Column being constrained, or -1 */
+  const char *zStart,   /* First byte of the constraint keyword */
+  const char *zEnd      /* First byte past that keyword */
 ){
   const char *zKw;
   const char *zLimit;
@@ -2548,7 +2549,7 @@ void sqlite3NotNullLocAdd(
   if( zLimit==0 || zLimit<zEnd ) zLimit = zEnd;
   zEnd = &zStart[notNullRtrim(zStart, zLimit)];
 
-  sqlite3ParseLocAdd(pParse, PARSELOC_NotNull, iCol, zStart, zEnd);
+  sqlite3ParseLocAdd(pParse, eType, iCol, zStart, zEnd);
 }
 
 /*
