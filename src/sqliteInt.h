@@ -5633,12 +5633,14 @@ void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Token*,Token*,Expr*,
 void sqlite3ConsLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ColDefLocExtend(Parse*);
+void sqlite3DefaultLocAdd(Parse*, Token*);
 void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 /* Allowed values for the second argument to sqlite3ParseLocAdd().  See the
 ** comment on struct ParseLoc in alter.c for what each one records. */
 #define PARSELOC_NotNull  1
 #define PARSELOC_ColDef   2
 #define PARSELOC_PrimaryKey 3
+#define PARSELOC_Default   4
 const void *sqlite3RenameTokenMap(Parse*, const void*, const Token*);
 void sqlite3RenameTokenRemap(Parse*, const void *pTo, const void *pFrom);
 void sqlite3RenameExprUnmap(Parse*, Expr*);
