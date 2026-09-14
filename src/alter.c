@@ -4188,7 +4188,251 @@ static u32 alterTableOptionCode(Token *pOpt){
   if( pOpt->n==6 && sqlite3_strnicmp(pOpt->z, "strict", 6)==0 ){
     return TF_Strict;
   }
+  if( pOpt->n==13 && sqlite3_strnicmp(pOpt->z, "without_rowid", 13)==0 ){
+    return TF_WithoutRowid;
+  }
   return 0;
+}
+
+static char *alterRebuildName(sqlite3 *db, const char *zTab){
+  return sqlite3MPrintf(db, "altertab_%s", zTab);
+}
+
+static int alterExecSql(sqlite3 *db, char **pzErrMsg, const char *zSql){
+  sqlite3_stmt *pStmt = 0;
+  int rc;
+
+  if( zSql==0 ) return SQLITE_NOMEM_BKPT;
+  rc = sqlite3_prepare_v2(db, zSql, -1, &pStmt, 0);
+  if( rc==SQLITE_OK ){
+    while( sqlite3_step(pStmt)==SQLITE_ROW ){}
+    rc = sqlite3_finalize(pStmt);
+  }else{
+    sqlite3_finalize(pStmt);
+  }
+  if( rc!=SQLITE_OK && *pzErrMsg==0 ){
+    sqlite3SetString(pzErrMsg, db, sqlite3_errmsg(db));
+  }
+  return rc;
+}
+static int alterExecSqlF(sqlite3 *db, char **pzErrMsg, const char *zFmt, ...){
+  char *z;
+  va_list ap;
+  int rc;
+  va_start(ap, zFmt);
+  z = sqlite3VMPrintf(db, zFmt, ap);
+  va_end(ap);
+  rc = alterExecSql(db, pzErrMsg, z);
+  sqlite3DbFree(db, z);
+  return rc;
+}
+
+static char *alterQueryText(sqlite3 *db, int *pRc, char *zSql){
+  sqlite3_stmt *pStmt = 0;
+  char *zRet = 0;
+  if( zSql==0 ){ *pRc = SQLITE_NOMEM_BKPT; return 0; }
+  *pRc = sqlite3_prepare_v2(db, zSql, -1, &pStmt, 0);
+  if( *pRc==SQLITE_OK ){
+    if( sqlite3_step(pStmt)==SQLITE_ROW ){
+      zRet = sqlite3DbStrDup(db, (const char*)sqlite3_column_text(pStmt, 0));
+    }
+    *pRc = sqlite3_finalize(pStmt);
+  }else{
+    sqlite3_finalize(pStmt);
+  }
+  sqlite3DbFree(db, zSql);
+  return zRet;
+}
+
+static char *alterRewriteCreate(
+  sqlite3 *db,          /* Database connection */
+  int iDb,              /* Schema that zSql belongs to */
+  const char *zSql,     /* The CREATE TABLE statement to rewrite */
+  u32 tabFlags,         /* TF_WithoutRowid and/or TF_Strict, or 0 */
+  const char *zNewName  /* Rename the table to this, or NULL to keep it */
+){
+  Parse sParse;
+  char *zNew = 0;
+  int rc;
+
+  rc = renameParseSql(&sParse, db->aDb[iDb].zDbSName, db, zSql, iDb==1);
+  if( rc==SQLITE_OK && sParse.pNewTable!=0 && sParse.zTabOpt!=0 ){
+    RenameToken *pName = renameTokenFind(&sParse, 0, sParse.pNewTable->zName);
+    int nKeep = (int)(sParse.zTabOpt - zSql);
+    const char *zWr = (tabFlags & TF_WithoutRowid) ? " WITHOUT ROWID" : "";
+    const char *zSep = ((tabFlags & TF_WithoutRowid)
+                     && (tabFlags & TF_Strict)) ? "," : "";
+    const char *zSt = (tabFlags & TF_Strict) ? " STRICT" : "";
+    if( zNewName==0 ){
+      zNew = sqlite3MPrintf(db, "%.*s%s%s%s", nKeep, zSql, zWr, zSep, zSt);
+    }else if( pName ){
+      int iName = (int)(pName->t.z - zSql);
+      assert( iName>0 && iName + (int)pName->t.n <= nKeep );
+      zNew = sqlite3MPrintf(db, "%.*s\"%w\"%.*s%s%s%s",
+          iName, zSql,                                   /* up to the name */
+          zNewName,                                      /* the new name */
+          nKeep - iName - (int)pName->t.n,               /* rest of the body */
+          &zSql[iName + pName->t.n],
+          zWr, zSep, zSt);
+    }
+  }
+  renameParseCleanup(&sParse);
+  return zNew;
+}
+
+int sqlite3RunAlterTabOpt(
+  char **pzErrMsg,      /* OUT: error message */
+  sqlite3 *db,          /* Database connection */
+  int iDb,              /* Schema holding the table */
+  const char *zTab,     /* Name of the table being rebuilt */
+  int bOn,              /* True to add WITHOUT ROWID, false to remove it */
+  int iPhase            /* 1 before the DROP, 2 after it */
+){
+  const char *zDb;
+  Table *pTab;
+  char *zTmp = 0;
+  char *zCols = 0;
+  char *zOldSql = 0;
+  char *zNewSql = 0;
+  sqlite3_stmt *pStmt = 0;
+  char **azRedo = 0;    /* DDL of each index and trigger on the table */
+  int nRedo = 0;
+  u8 savedInitDb;
+  u64 savedFlags;
+  int rc = SQLITE_OK;
+  int i;
+
+  assert( iDb>=0 && iDb<db->nDb );
+  assert( iPhase==1 || iPhase==2 );
+  zDb = db->aDb[iDb].zDbSName;
+  zTmp = alterRebuildName(db, zTab);
+  if( zTmp==0 ) return SQLITE_NOMEM_BKPT;
+
+  if( iPhase==2 ){
+    savedFlags = db->flags;
+    savedInitDb = db->init.iDb;
+    db->flags |= SQLITE_LegacyAlter;
+    rc = alterExecSqlF(db, pzErrMsg, "ALTER TABLE \"%w\".\"%w\" RENAME TO \"%w\"",
+                       zDb, zTmp, zTab);
+    db->flags = savedFlags;
+
+    if( db->pAlterRedo ){
+      char **az = db->pAlterRedo;
+
+      if( rc==SQLITE_OK && az[0] ){
+        u64 f = db->flags;
+        db->flags |= SQLITE_WriteSchema;
+        db->flags &= ~(u64)SQLITE_Defensive;
+        rc = alterExecSqlF(db, pzErrMsg,
+            "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET sql=%Q"
+            " WHERE type='table' AND name=%Q COLLATE nocase",
+            zDb, az[0], zTab);
+        db->flags = f;
+      }
+      for(i=1; rc==SQLITE_OK && az[i]; i++){
+        db->init.iDb = (u8)iDb;
+        rc = alterExecSql(db, pzErrMsg, az[i]);
+        db->init.iDb = savedInitDb;
+      }
+      for(i=0; az[i]; i++) sqlite3DbFree(db, az[i]);
+      sqlite3DbFree(db, az);
+      db->pAlterRedo = 0;
+    }
+    sqlite3DbFree(db, zTmp);
+    return rc;
+  }
+
+  if( db->pAlterRedo ){
+    char **az = db->pAlterRedo;
+    for(i=0; az[i]; i++) sqlite3DbFree(db, az[i]);
+    sqlite3DbFree(db, az);
+    db->pAlterRedo = 0;
+  }
+  pTab = sqlite3FindTable(db, zTab, zDb);
+  if( pTab==0 || !IsOrdinaryTable(pTab) ){
+    rc = SQLITE_CORRUPT_BKPT;
+    goto alter_tabopt_out;
+  }
+
+  for(i=0; i<pTab->nCol; i++){
+    if( pTab->aCol[i].colFlags & COLFLAG_GENERATED ) continue;
+    zCols = sqlite3MPrintf(db, "%z%s\"%w\"", zCols, zCols?",":"",
+                           pTab->aCol[i].zCnName);
+    if( zCols==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
+  }
+  if( zCols==0 ){ rc = SQLITE_CORRUPT_BKPT; goto alter_tabopt_out; }
+
+  zOldSql = alterQueryText(db, &rc, sqlite3MPrintf(db,
+      "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
+      " WHERE type='table' AND name=%Q COLLATE nocase", zDb, zTab));
+  if( rc!=SQLITE_OK ) goto alter_tabopt_out;
+  if( zOldSql==0 ){ rc = SQLITE_CORRUPT_BKPT; goto alter_tabopt_out; }
+
+  azRedo = sqlite3DbMallocZero(db, 2*sizeof(char*));
+  if( azRedo==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
+  nRedo = 1;
+
+  {
+    char *zQ = sqlite3MPrintf(db,
+        "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
+        " WHERE tbl_name=%Q COLLATE nocase AND sql IS NOT NULL"
+        " AND type IN ('index','trigger')", zDb, zTab);
+    if( zQ==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
+    rc = sqlite3_prepare_v2(db, zQ, -1, &pStmt, 0);
+    sqlite3DbFree(db, zQ);
+  }
+  if( rc!=SQLITE_OK ) goto alter_tabopt_err;
+  while( sqlite3_step(pStmt)==SQLITE_ROW ){
+    char **azNew = sqlite3DbRealloc(db, azRedo, (nRedo+2)*sizeof(char*));
+    if( azNew==0 ){ rc = SQLITE_NOMEM_BKPT; break; }
+    azRedo = azNew;
+    azRedo[nRedo] = sqlite3DbStrDup(db,
+        (const char*)sqlite3_column_text(pStmt, 0));
+    if( azRedo[nRedo]==0 ){ rc = SQLITE_NOMEM_BKPT; break; }
+    azRedo[++nRedo] = 0;
+  }
+  if( rc==SQLITE_OK ) rc = sqlite3_finalize(pStmt); else sqlite3_finalize(pStmt);
+  pStmt = 0;
+  if( rc!=SQLITE_OK ) goto alter_tabopt_err;
+
+  zNewSql = alterRewriteCreate(db, iDb, zOldSql,
+      (bOn ? TF_WithoutRowid : 0) | (pTab->tabFlags & TF_Strict), zTmp);
+  if( zNewSql==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
+
+  azRedo[0] = alterRewriteCreate(db, iDb, zOldSql,
+      (bOn ? TF_WithoutRowid : 0) | (pTab->tabFlags & TF_Strict), 0);
+  if( azRedo[0]==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
+
+  savedInitDb = db->init.iDb;
+  db->init.iDb = (u8)iDb;
+  rc = alterExecSql(db, pzErrMsg, zNewSql);
+  db->init.iDb = savedInitDb;
+
+  if( rc==SQLITE_OK ){
+    rc = alterExecSqlF(db, pzErrMsg,
+        "INSERT INTO \"%w\".\"%w\"(%s) SELECT %s FROM \"%w\".\"%w\"",
+        zDb, zTmp, zCols, zCols, zDb, zTab);
+  }
+
+  if( rc==SQLITE_OK ){
+    db->pAlterRedo = azRedo;
+    azRedo = 0;
+    nRedo = 0;
+  }
+  goto alter_tabopt_out;
+
+alter_tabopt_err:
+  if( *pzErrMsg==0 ) sqlite3SetString(pzErrMsg, db, sqlite3_errmsg(db));
+
+alter_tabopt_out:
+  if( pStmt ) sqlite3_finalize(pStmt);
+  for(i=0; i<nRedo; i++) sqlite3DbFree(db, azRedo[i]);
+  sqlite3DbFree(db, azRedo);
+  sqlite3DbFree(db, zOldSql);
+  sqlite3DbFree(db, zNewSql);
+  sqlite3DbFree(db, zCols);
+  sqlite3DbFree(db, zTmp);
+  return rc;
 }
 
 /*
@@ -4300,6 +4544,81 @@ static void alterSetStrict(
   alterCheckExistingRows(pParse, pTab, zDb, "STRICT", bOn);
 }
 
+static void alterSetWithoutRowid(
+  Parse *pParse,        /* Parsing context */
+  Table *pTab,          /* The table being altered */
+  int iDb,              /* Index of the schema holding pTab */
+  int bOn               /* True to turn WITHOUT ROWID on */
+){
+  sqlite3 *db = pParse->db;
+  const char *zDb = db->aDb[iDb].zDbSName;
+  Vdbe *v;
+  char *zTab;
+  char *zTmp;
+  SrcList *pDrop;
+  Token tSchema, tName;
+
+  assert( IsOrdinaryTable(pTab) );
+
+  if( bOn ){
+    if( (pTab->tabFlags & TF_HasPrimaryKey)==0 ){
+      sqlite3ErrorMsg(pParse, "PRIMARY KEY missing on table %s", pTab->zName);
+      return;
+    }
+    if( pTab->tabFlags & TF_Autoincrement ){
+      sqlite3ErrorMsg(pParse,
+          "AUTOINCREMENT not allowed on WITHOUT ROWID tables");
+      return;
+    }
+  }
+
+  if( db->flags & SQLITE_ForeignKeys ){
+    HashElem *k;
+    Schema *pSchema = db->aDb[iDb].pSchema;
+    for(k=sqliteHashFirst(&pSchema->tblHash); k; k=sqliteHashNext(k)){
+      Table *pOther = sqliteHashData(k);
+      FKey *pFKey;
+      if( !IsOrdinaryTable(pOther) ) continue;
+      for(pFKey=pOther->u.tab.pFKey; pFKey; pFKey=pFKey->pNextFrom){
+        if( sqlite3_stricmp(pFKey->zTo, pTab->zName)==0 ){
+          sqlite3ErrorMsg(pParse,
+              "cannot rebuild %s while foreign keys are enabled: "
+              "table %s refers to it", pTab->zName, pOther->zName);
+          return;
+        }
+      }
+    }
+  }
+
+  zTmp = alterRebuildName(db, pTab->zName);
+  if( zTmp==0 ) return;
+  if( sqlite3FindTable(db, zTmp, zDb)!=0 ){
+    sqlite3ErrorMsg(pParse, "cannot rebuild %s: table %s is in the way",
+                    pTab->zName, zTmp);
+    sqlite3DbFree(db, zTmp);
+    return;
+  }
+  sqlite3DbFree(db, zTmp);
+
+  v = sqlite3GetVdbe(pParse);
+  if( v==0 ) return;
+  sqlite3MayAbort(pParse);
+
+  zTab = sqlite3DbStrDup(db, pTab->zName);
+  if( zTab==0 ) return;
+  sqlite3VdbeAddOp4(v, OP_AlterTabOpt, iDb, bOn!=0, 1, zTab, P4_DYNAMIC);
+
+  sqlite3TokenInit(&tSchema, (char*)zDb);
+  sqlite3TokenInit(&tName, pTab->zName);
+  pDrop = sqlite3SrcListAppend(pParse, 0, &tSchema, &tName);
+  if( pDrop==0 ) return;
+  sqlite3DropTable(pParse, pDrop, 0, 0);
+
+  zTab = sqlite3DbStrDup(db, pTab->zName);
+  if( zTab==0 ) return;
+  sqlite3VdbeAddOp4(v, OP_AlterTabOpt, iDb, bOn!=0, 2, zTab, P4_DYNAMIC);
+}
+
 /*
 ** Generate bytecode to implement:
 **
@@ -4342,8 +4661,12 @@ void sqlite3AlterSetTableOption(
   /* Setting the option to what it already is changes nothing. */
   if( ((pTab->tabFlags & optFlag)!=0)==(bOn!=0) ) return;
 
-  assert( optFlag==TF_Strict );
-  alterSetStrict(pParse, pTab, iDb, zDb, bOn);
+  if( optFlag==TF_Strict ){
+    alterSetStrict(pParse, pTab, iDb, zDb, bOn);
+  }else{
+    assert( optFlag==TF_WithoutRowid );
+    alterSetWithoutRowid(pParse, pTab, iDb, bOn);
+  }
 }
 
 /*

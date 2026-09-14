@@ -908,6 +908,9 @@ static void resolveP2Values(Vdbe *p, int *pMaxVtabArgs){
         case OP_Checkpoint:
 #endif
         case OP_Vacuum:
+#ifndef SQLITE_OMIT_ALTERTABLE
+        case OP_AlterTabOpt:
+#endif
         case OP_JournalMode: {
           p->readOnly = 0;
           p->bIsReader = 1;

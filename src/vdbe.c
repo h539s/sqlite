@@ -8343,6 +8343,16 @@ case OP_Vacuum: {
 }
 #endif
 
+#ifndef SQLITE_OMIT_ALTERTABLE
+case OP_AlterTabOpt: {
+  assert( p->readOnly==0 );
+  rc = sqlite3RunAlterTabOpt(&p->zErrMsg, db, pOp->p1, pOp->p4.z,
+                             pOp->p2, pOp->p3);
+  if( rc ) goto abort_due_to_error;
+  break;
+}
+#endif
+
 #if !defined(SQLITE_OMIT_AUTOVACUUM)
 /* Opcode: IncrVacuum P1 P2 * * *
 **

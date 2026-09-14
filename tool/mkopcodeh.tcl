@@ -161,6 +161,7 @@ set rp2v_ops {
   OP_Savepoint
   OP_Checkpoint
   OP_Vacuum
+  OP_AlterTabOpt
   OP_JournalMode
   OP_VUpdate
   OP_VFilter
