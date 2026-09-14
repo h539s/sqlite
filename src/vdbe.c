@@ -8364,6 +8364,7 @@ case OP_AlterTabOpt: {
   assert( p->readOnly==0 );
   rc = sqlite3RunAlterTabOpt(&p->zErrMsg, db, pOp->p1, pOp->p4.z,
                              pOp->p2, pOp->p3);
+  p->expired = 0;
   if( rc ) goto abort_due_to_error;
   break;
 }
