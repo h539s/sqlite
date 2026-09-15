@@ -1982,10 +1982,11 @@ cmd ::= ALTER TABLE fullname(X) DROP FOREIGN KEY LP eidlist(F) RP
 }
 // A CHECK need not have a name, and SQLite draws no distinction between one
 // written on a column and one written on the table - pTab->pCheck is a flat
-// list and a column-level CHECK may refer to any column.  What makes a CHECK
-// belong to a column is that it was written inside that column's definition,
-// so naming a column removes those and leaves a table-level CHECK alone even
-// when it mentions the column.  Naming none removes every CHECK there is.
+// list and a column-level CHECK may refer to any column.  Where it was
+// written is therefore all there is to go on, and the two forms partition
+// the constraints by exactly that: naming a column takes the ones inside
+// that column's definition, naming none takes the ones after the column
+// list.  Neither reaches the other's, whatever they mention.
 cmd ::= ALTER TABLE fullname(X) DROP CHECK. {
   sqlite3AlterDropCheck(pParse, X);
 }
