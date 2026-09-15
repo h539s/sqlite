@@ -2740,6 +2740,25 @@ static int skipCreateTable(sqlite3_context *ctx, const u8 *zSql, int *piOff){
   return SQLITE_OK;
 }
 
+/*
+** Check that the statement stored for a table still describes the table
+** this connection has in memory.
+**
+** ALTER TABLE works from two sources at once.  It decides what to do from
+** the in-memory Table - that is what alterFindTable() and alterFindCol()
+** read - and it edits the text held in sqlite_schema.  The two are kept in
+** step by the schema cookie, which every DDL statement bumps and which
+** OP_Transaction checks against Schema.iGeneration.  Editing sqlite_schema
+** by hand under writable_schema bumps neither, so the two can disagree with
+** nothing to notice it.
+**
+** pNew is the table as just reparsed out of the stored text.  Compare it
+** against the live one of the same name: same number of columns, same names
+** in the same order.  A disagreement means the text being edited is not the
+** definition the command was planned against, so editing it further would
+** write out something nobody asked for.  Report corruption instead and let
+** the statement abort with the stored text untouched.
+*/
 static int alterStoredTableAgrees(sqlite3 *db, const char *zDb, Table *pNew){
   Table *pLive;
   int i;
@@ -2756,6 +2775,15 @@ static int alterStoredTableAgrees(sqlite3 *db, const char *zDb, Table *pNew){
   return SQLITE_OK;
 }
 
+/*
+** Reparse the stored statement zSql, which belongs to schema ISCHEMA, and
+** check it against the live table with alterStoredTableAgrees().  Return
+** non-zero and set an error on ctx if it does not hold up.
+**
+** The editors that reparse anyway call alterStoredTableAgrees() directly on
+** the parse they already have.  This is for sqlite_drop_constraint(), which
+** finds its constraint by scanning and so has no parse of its own.
+*/
 static int alterCheckStoredTable(
   sqlite3_context *ctx,   /* Function context, for the error */
   int iSchema,            /* Schema the statement belongs to */
@@ -2795,8 +2823,10 @@ static int alterCheckStoredTable(
 ** with a constraint removed.  Two forms, depending on the datatype
 ** of argv[2]:
 **
-**   sqlite_drop_constraint(SQL, INT)  -- Omit NOT NULL from the INT-th column
-**   sqlite_drop_constraint(SQL, TEXT) -- OMIT constraint with name TEXT
+**   sqlite_drop_constraint(ISCHEMA, SQL, INT)  -- Omit NOT NULL from the
+**                                                 INT-th column
+**   sqlite_drop_constraint(ISCHEMA, SQL, TEXT) -- Omit the constraint
+**                                                 named TEXT
 **
 ** In the first case, the left-most column is 0.
 */
@@ -2820,6 +2850,9 @@ static void dropConstraintFunc(
 
   if( zSql==0 ) return;
 
+  /* This one finds the constraint by scanning rather than by reparsing, but
+  ** it still has to be looking at the right table.  Check the stored text
+  ** against the live one first, exactly as the reparsing editors do. */
   if( alterCheckStoredTable(ctx, iSchema, (const char*)zSql) ) return;
 
   /* Jump past the "CREATE TABLE" bit. */
@@ -2978,6 +3011,8 @@ static void dropNotNullFunc(
 
   rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
   if( rc!=SQLITE_OK ){
+    /* The stored statement does not parse.  It is the definition of the very
+    ** table being altered, so there is nothing sensible to do with it. */
     rc = SQLITE_CORRUPT_BKPT;
     goto drop_notnull_cleanup;
   }
@@ -3104,6 +3139,8 @@ static void insertConstraintFunc(
 
   rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
   if( rc!=SQLITE_OK ){
+    /* The stored statement does not parse.  It is the definition of the very
+    ** table being altered, so there is nothing sensible to do with it. */
     rc = SQLITE_CORRUPT_BKPT;
     goto insert_cons_cleanup;
   }
