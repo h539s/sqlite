@@ -9,7 +9,7 @@
 #
 #*************************************************************************
 #
-# Tests for ALTER TABLE <table> SET WITHOUT_ROWID = ON and = OFF.
+# Tests for ALTER TABLE <table> SET WITHOUT ROWID ON and = OFF.
 #
 # Unlike SET STRICT this is not a schema-text edit: a rowid table and a
 # WITHOUT ROWID table have different b-trees, so the table is built anew
@@ -84,7 +84,7 @@ foreach {tn create rows tbl nm after} {
   reset_db
   do_execsql_test 1.$tn.0 $create
   if {$rows ne ""} { do_execsql_test 1.$tn.1 $rows }
-  do_execsql_test 1.$tn.2 "ALTER TABLE $tbl SET WITHOUT_ROWID = ON" {}
+  do_execsql_test 1.$tn.2 "ALTER TABLE $tbl SET WITHOUT ROWID ON" {}
   do_execsql_test 1.$tn.3 {
     SELECT sql FROM sqlite_schema WHERE type='table' AND sql IS NOT NULL
   } [list $after]
@@ -118,7 +118,7 @@ foreach {tn create tbl nm after} {
 } {
   reset_db
   do_execsql_test 2.$tn.0 $create
-  do_execsql_test 2.$tn.1 "ALTER TABLE $tbl SET WITHOUT_ROWID = OFF" {}
+  do_execsql_test 2.$tn.1 "ALTER TABLE $tbl SET WITHOUT ROWID OFF" {}
   do_execsql_test 2.$tn.2 {
     SELECT sql FROM sqlite_schema WHERE type='table' AND sql IS NOT NULL
   } [list $after]
@@ -138,11 +138,11 @@ do_execsql_test 3.0 {
   INSERT INTO t1 VALUES(1,'abc'),(2,3.5),(3,x'ff'),(4,NULL),(5,9);
 }
 do_execsql_test 3.1 {
-  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  ALTER TABLE t1 SET WITHOUT ROWID ON;
   SELECT k, typeof(v), quote(v) FROM t1 ORDER BY k;
 } {1 text 'abc' 2 real 3.5 3 blob X'FF' 4 null NULL 5 integer 9}
 do_execsql_test 3.2 {
-  ALTER TABLE t1 SET WITHOUT_ROWID = OFF;
+  ALTER TABLE t1 SET WITHOUT ROWID OFF;
   SELECT k, typeof(v), quote(v) FROM t1 ORDER BY k;
 } {1 text 'abc' 2 real 3.5 3 blob X'FF' 4 null NULL 5 integer 9}
 do_execsql_test 3.3 {
@@ -154,7 +154,7 @@ do_execsql_test 3.3 {
 do_execsql_test 3.4 {
   CREATE TABLE t2(k INT PRIMARY KEY, v) WITHOUT ROWID;
   CREATE TABLE t3(k INT PRIMARY KEY, v);
-  ALTER TABLE t3 SET WITHOUT_ROWID = ON;
+  ALTER TABLE t3 SET WITHOUT ROWID ON;
   SELECT (SELECT replace(sql,'t2','X') FROM sqlite_schema WHERE name='t2')
       == (SELECT replace(sql,'t3','X') FROM sqlite_schema WHERE name='t3');
 } {1}
@@ -171,7 +171,7 @@ do_execsql_test 4.0 {
   CREATE UNIQUE INDEX i2 ON t1(b,a);
   CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END;
   INSERT INTO t1 VALUES(1,'x');
-  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  ALTER TABLE t1 SET WITHOUT ROWID ON;
   SELECT type, name, coalesce(sql,'-') FROM sqlite_schema ORDER BY name;
 } {index i1 {CREATE INDEX i1 ON t1(b)} index i2 {CREATE UNIQUE INDEX i2 ON t1(b,a)} trigger r1 {CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END} table t1 {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID}}
 
@@ -183,7 +183,7 @@ do_execsql_test 4.2 {
   CREATE TABLE log(x);
   DROP TRIGGER r1;
   CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN INSERT INTO log VALUES(new.a); END;
-  ALTER TABLE t1 SET WITHOUT_ROWID = OFF;
+  ALTER TABLE t1 SET WITHOUT ROWID OFF;
   INSERT INTO t1 VALUES(7,'q');
   SELECT x FROM log;
 } {7}
@@ -196,13 +196,13 @@ do_execsql_test 5.0 {
   CREATE TABLE t1(a INT PRIMARY KEY, b);
   INSERT INTO t1 VALUES(1,'x');
   BEGIN;
-  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  ALTER TABLE t1 SET WITHOUT ROWID ON;
   ROLLBACK;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT PRIMARY KEY, b)}}
 do_execsql_test 5.1 {
   BEGIN;
-  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  ALTER TABLE t1 SET WITHOUT ROWID ON;
   COMMIT;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT PRIMARY KEY, b) WITHOUT ROWID}}
@@ -218,12 +218,12 @@ do_execsql_test 6.0 {
   CREATE TEMP TABLE t1(a INT PRIMARY KEY, b);
   CREATE INDEX i1 ON t1(b);
   INSERT INTO t1 VALUES(1,'x');
-  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  ALTER TABLE t1 SET WITHOUT ROWID ON;
   SELECT type, name, coalesce(sql,'-') FROM sqlite_temp_schema ORDER BY name;
 } {index i1 {CREATE INDEX i1 ON t1(b)} table t1 {CREATE TABLE t1(a INT PRIMARY KEY, b) WITHOUT ROWID}}
 do_execsql_test 6.1 { SELECT a, b FROM t1 } {1 x}
 do_execsql_test 6.2 {
-  ALTER TABLE t1 SET WITHOUT_ROWID = OFF;
+  ALTER TABLE t1 SET WITHOUT ROWID OFF;
   SELECT sql FROM sqlite_temp_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT PRIMARY KEY, b)}}
 
@@ -236,7 +236,7 @@ do_execsql_test 6.3 {
   CREATE TABLE t1(a INT PRIMARY KEY, b);
   CREATE TABLE log(x);
   CREATE TEMP TRIGGER r1 AFTER INSERT ON t1 BEGIN INSERT INTO log VALUES(new.a); END;
-  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  ALTER TABLE t1 SET WITHOUT ROWID ON;
   SELECT type, name FROM sqlite_temp_schema;
 } {trigger r1}
 do_execsql_test 6.4 {
@@ -252,7 +252,7 @@ do_execsql_test 6.5 {
   CREATE TABLE t1(a INT PRIMARY KEY, b);
   CREATE TEMP TABLE t1(a INT PRIMARY KEY, b);
   CREATE TEMP TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END;
-  ALTER TABLE main.t1 SET WITHOUT_ROWID = ON;
+  ALTER TABLE main.t1 SET WITHOUT ROWID ON;
   SELECT type, name FROM sqlite_temp_schema WHERE type='trigger';
 } {trigger r1}
 do_execsql_test 6.6 {
@@ -273,7 +273,7 @@ do_execsql_test 7.0 {
   CREATE TABLE aux.t1(a INT PRIMARY KEY, b);
   CREATE INDEX aux.i1 ON t1(b);
   INSERT INTO aux.t1 VALUES(1,'x');
-  ALTER TABLE aux.t1 SET WITHOUT_ROWID = ON;
+  ALTER TABLE aux.t1 SET WITHOUT ROWID ON;
   SELECT type, name, coalesce(sql,'-') FROM aux.sqlite_schema ORDER BY name;
 } {index i1 {CREATE INDEX i1 ON t1(b)} table t1 {CREATE TABLE t1(a INT PRIMARY KEY, b) WITHOUT ROWID}}
 do_execsql_test 7.1 { SELECT a, b FROM aux.t1 } {1 x}
@@ -286,7 +286,7 @@ do_execsql_test 7.3 { PRAGMA aux.integrity_check } {ok}
 reset_db
 do_catchsql_test 8.0 {
   CREATE TABLE t1(a INT, b TEXT);
-  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  ALTER TABLE t1 SET WITHOUT ROWID ON;
 } {1 {PRIMARY KEY missing on table t1}}
 do_execsql_test 8.1 {
   SELECT sql FROM sqlite_schema WHERE name='t1';
@@ -295,7 +295,7 @@ do_execsql_test 8.1 {
 reset_db
 do_catchsql_test 8.2 {
   CREATE TABLE t1(a INTEGER PRIMARY KEY AUTOINCREMENT, b);
-  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  ALTER TABLE t1 SET WITHOUT ROWID ON;
 } {1 {AUTOINCREMENT not allowed on WITHOUT ROWID tables}}
 
 # The drop between the phases would fire foreign key actions on rows in
@@ -307,7 +307,7 @@ do_catchsql_test 8.3 {
   PRAGMA foreign_keys=ON;
   CREATE TABLE p(a INT PRIMARY KEY);
   CREATE TABLE c(x INT REFERENCES p(a));
-  ALTER TABLE p SET WITHOUT_ROWID = ON;
+  ALTER TABLE p SET WITHOUT ROWID ON;
 } {1 {cannot rebuild p while foreign keys are enabled: table c refers to it}}
 do_execsql_test 8.4 {
   SELECT count(*) FROM pragma_table_list WHERE name='p' AND wr=1;
@@ -322,7 +322,7 @@ do_execsql_test 8.5 {
   CREATE TABLE c(x INT REFERENCES p(a));
   INSERT INTO p VALUES(1);
   INSERT INTO c VALUES(1);
-  ALTER TABLE p SET WITHOUT_ROWID = ON;
+  ALTER TABLE p SET WITHOUT ROWID ON;
   SELECT (SELECT a FROM p), (SELECT x FROM c);
 } {1 1}
 
@@ -333,26 +333,26 @@ reset_db
 do_catchsql_test 8.6 {
   CREATE TABLE t1(a INT PRIMARY KEY, b);
   CREATE TABLE altertab_t1(x);
-  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  ALTER TABLE t1 SET WITHOUT ROWID ON;
 } {1 {cannot rebuild t1: table altertab_t1 is in the way}}
 
 reset_db
 do_catchsql_test 8.7 {
   CREATE VIEW v AS SELECT 1;
-  ALTER TABLE v SET WITHOUT_ROWID = ON;
+  ALTER TABLE v SET WITHOUT ROWID ON;
 } {1 {cannot set table options on view "v"}}
 
 do_catchsql_test 8.8 {
-  ALTER TABLE nope SET WITHOUT_ROWID = ON;
+  ALTER TABLE nope SET WITHOUT ROWID ON;
 } {1 {no such table: nope}}
 
 do_catchsql_test 8.9 {
   CREATE TABLE t1(a INT PRIMARY KEY, b);
-  ALTER TABLE t1 SET WITHOUT_ROWID = MAYBE;
+  ALTER TABLE t1 SET WITHOUT ROWID MAYBE;
 } {1 {expected ON or OFF, got: MAYBE}}
 
 do_catchsql_test 8.10 {
-  ALTER TABLE t1 SET WIDGETS = ON;
+  ALTER TABLE t1 SET WIDGETS ON;
 } {1 {unknown table option: WIDGETS}}
 
 # Setting the option to what it already is does nothing at all -- in
@@ -362,12 +362,12 @@ reset_db
 do_execsql_test 9.0 {
   CREATE TABLE t1(a INT PRIMARY KEY, b) WITHOUT ROWID;
   INSERT INTO t1 VALUES(1,'x');
-  ALTER TABLE t1 SET WITHOUT_ROWID = ON;
+  ALTER TABLE t1 SET WITHOUT ROWID ON;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT PRIMARY KEY, b) WITHOUT ROWID}}
 do_execsql_test 9.1 {
   CREATE TABLE t2(a INT PRIMARY KEY, b);
-  ALTER TABLE t2 SET WITHOUT_ROWID = OFF;
+  ALTER TABLE t2 SET WITHOUT ROWID OFF;
   SELECT sql FROM sqlite_schema WHERE name='t2';
 } {{CREATE TABLE t2(a INT PRIMARY KEY, b)}}
 
