@@ -3728,18 +3728,23 @@ static void alterAddConstraintText(
   Table *pTab,          /* Table being altered */
   int iDb,              /* Schema holding pTab */
   const char *zDb,      /* Name of that schema */
-  const char *zName,    /* Name of the new constraint */
+  const char *zName,    /* Name of the new constraint, or 0 if unnamed */
   const char *zCons,    /* Text of the constraint to store */
   int nCons,            /* Bytes of zCons to use */
   const char *zCol      /* Column to attach it to, or 0 for the table */
 ){
-  sqlite3NestedParse(pParse,
-      "SELECT sqlite_fail('constraint %q already exists', %d) "
-      "FROM \"%w\"." LEGACY_SCHEMA_TABLE " "
-      "WHERE type='table' AND tbl_name=%Q COLLATE nocase "
-      "AND sqlite_find_constraint(sql, %Q)",
-      zName, SQLITE_ERROR, zDb, pTab->zName, zName
-  );
+  /* An unnamed constraint has no name to collide with, so there is nothing
+  ** to look for.  That is the DEFAULT case: it is reached by kind rather
+  ** than by name, so no name is asked for and none is stored. */
+  if( zName ){
+    sqlite3NestedParse(pParse,
+        "SELECT sqlite_fail('constraint %q already exists', %d) "
+        "FROM \"%w\"." LEGACY_SCHEMA_TABLE " "
+        "WHERE type='table' AND tbl_name=%Q COLLATE nocase "
+        "AND sqlite_find_constraint(sql, %Q)",
+        zName, SQLITE_ERROR, zDb, pTab->zName, zName
+    );
+  }
 
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
@@ -3930,7 +3935,7 @@ add_named_cons_exit:
 /*
 ** Implement:
 **
-**     ALTER TABLE <table> ADD CONSTRAINT <name> (<column>) DEFAULT <value>
+**     ALTER TABLE <table> COLUMN <column> ADD DEFAULT <value>
 **
 ** DEFAULT is the one constraint this command understands that cannot be a
 ** table-constraint, so this form names the column it belongs to.  pExpr
@@ -3942,9 +3947,7 @@ add_named_cons_exit:
 */
 void sqlite3AlterAddDefault(
   Parse *pParse,        /* Parse context */
-  SrcList *pSrc,        /* Table to add the constraint to */
-  Token *pFirst,        /* The CONSTRAINT keyword */
-  Token *pName,         /* Name of the new constraint */
+  SrcList *pSrc,        /* Table to add the default to */
   Token *pCol,          /* Name of the column it applies to */
   Expr *pExpr,          /* The default value, as parsed */
   const char *zStart,   /* First byte of the default value text */
@@ -3956,7 +3959,6 @@ void sqlite3AlterAddDefault(
   int iDb = 0;
   int iCol = 0;
   const char *zDb = 0;
-  char *zName = 0;
   char *zCons = 0;
 
   assert( pSrc->nSrc==1 );
@@ -3986,21 +3988,18 @@ void sqlite3AlterAddDefault(
   if( db->xAuth ) sqlite3FuncAuth(pParse, pExpr);
 #endif
 
-  /* The "(<column>)" in the middle is addressed to this command and is not
-  ** part of the constraint, so the text to store is put together from the
-  ** name and the value rather than copied whole. */
-  zName = sqlite3NameFromToken(db, pName);
-  if( zName==0 ) goto add_default_exit;
-  zCons = sqlite3MPrintf(db, "CONSTRAINT %.*s DEFAULT %.*s",
-                         (int)pName->n, pName->z, (int)(zEnd - zStart), zStart);
+  /* The column is addressed to this command and is not part of what gets
+  ** stored, so the text is put together from the value rather than copied
+  ** whole.  There is no name: a DEFAULT is reached by kind, through
+  ** ALTER TABLE ... COLUMN <c> DROP DEFAULT. */
+  zCons = sqlite3MPrintf(db, "DEFAULT %.*s", (int)(zEnd - zStart), zStart);
   if( zCons==0 ) goto add_default_exit;
 
-  alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons,
+  alterAddConstraintText(pParse, pTab, iDb, zDb, 0, zCons,
                          sqlite3Strlen30(zCons), pTabCol->zCnName);
 
 add_default_exit:
   sqlite3ExprDelete(db, pExpr);
-  sqlite3DbFree(db, zName);
   sqlite3DbFree(db, zCons);
 }
 

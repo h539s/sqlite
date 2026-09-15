@@ -2077,35 +2077,32 @@ cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N)
                                  0, 0, 0);
 }
 
-// The DEFAULT form.  These mirror the five "ccons ::= DEFAULT ..." rules so
-// that exactly the same expressions are accepted here as in a CREATE TABLE,
-// and each hands over the same (expression, text extent) pair that
-// sqlite3AddDefaultValue() is given there.
-//
-cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
-        DEFAULT scantok(A) term(E). {
-  sqlite3AlterAddDefault(pParse, X, &K, &N, &C, E, A.z, &A.z[A.n]);
+// A DEFAULT belongs to one column rather than to the table, so the column
+// is named up front and there is no constraint name to give.  These five
+// mirror the "ccons ::= DEFAULT ..." rules so that exactly the same
+// expressions are accepted here as in a CREATE TABLE, and each hands over
+// the same (expression, text extent) pair.
+cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(C) ADD DEFAULT scantok(A) term(E). {
+  sqlite3AlterAddDefault(pParse, X, &C, E, A.z, &A.z[A.n]);
 }
-cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
-        DEFAULT LP(A) expr(E) RP(Z). {
+cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(C) ADD DEFAULT LP(A) expr(E) RP(Z). {
   /* Unlike the CREATE TABLE rule this keeps the parentheses: the text is
   ** stored as a constraint of its own, and "DEFAULT 2+3" does not parse. */
-  sqlite3AlterAddDefault(pParse, X, &K, &N, &C, E, A.z, &Z.z[Z.n]);
+  sqlite3AlterAddDefault(pParse, X, &C, E, A.z, &Z.z[Z.n]);
 }
-cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
+cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(C) ADD
         DEFAULT PLUS(A) scantok(Z) term(E). {
-  sqlite3AlterAddDefault(pParse, X, &K, &N, &C, E, A.z, &Z.z[Z.n]);
+  sqlite3AlterAddDefault(pParse, X, &C, E, A.z, &Z.z[Z.n]);
 }
-cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
+cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(C) ADD
         DEFAULT MINUS(A) scantok(Z) term(E). {
   Expr *p = sqlite3PExpr(pParse, TK_UMINUS, E, 0);
-  sqlite3AlterAddDefault(pParse, X, &K, &N, &C, p, A.z, &Z.z[Z.n]);
+  sqlite3AlterAddDefault(pParse, X, &C, p, A.z, &Z.z[Z.n]);
 }
-cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N) LP nm(C) RP
-        DEFAULT scantok id(E). {
+cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(C) ADD DEFAULT scantok id(E). {
   Expr *p = tokenExpr(pParse, TK_STRING, E);
   if( p ) sqlite3ExprIdToTrueFalse(p);
-  sqlite3AlterAddDefault(pParse, X, &K, &N, &C, p, E.z, &E.z[E.n]);
+  sqlite3AlterAddDefault(pParse, X, &C, p, E.z, &E.z[E.n]);
 }
 
 kwcolumn_opt ::= .

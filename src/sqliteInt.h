@@ -5630,7 +5630,7 @@ void sqlite3AlterDropCheck(Parse*, SrcList*);
 void sqlite3AlterSetColumnType(Parse*, SrcList*, Token*, Token*);
 void sqlite3AlterAddNamedConstraint(Parse*,SrcList*,Token*,Token*,int,
                                     ExprList*,const char*,int);
-void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Token*,Token*,Expr*,
+void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Expr*,
                             const char*,const char*);
 /* Allowed values for the eType parameter of sqlite3AlterAddNamedConstraint() */
 #define ALTERCONS_Unique      1
