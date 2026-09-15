@@ -1980,6 +1980,12 @@ cmd ::= ALTER TABLE fullname(X) DROP FOREIGN KEY LP eidlist(F) RP
         REFERENCES nm(T) eidlist_opt(TA). {
   sqlite3AlterDropForeignKey(pParse, X, F, &T, TA);
 }
+// A CHECK need not have a name, and SQLite draws no distinction between one
+// written on a column and one written on the table - pTab->pCheck is a flat
+// list and a column-level CHECK may refer to any column.  What makes a CHECK
+// belong to a column is that it was written inside that column's definition,
+// so naming a column removes those and leaves a table-level CHECK alone even
+// when it mentions the column.  Naming none removes every CHECK there is.
 cmd ::= ALTER TABLE fullname(X) DROP CHECK. {
   sqlite3AlterDropCheck(pParse, X);
 }
