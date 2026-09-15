@@ -9,7 +9,7 @@
 #
 #*************************************************************************
 #
-# Tests for ALTER TABLE <table> SET STRICT = ON and = OFF.
+# Tests for ALTER TABLE <table> SET STRICT ON and = OFF.
 #
 # ON appends the STRICT table-option to the stored CREATE TABLE statement.
 # OFF regenerates the whole table-option list without it, so it does not
@@ -98,7 +98,7 @@ foreach {tn create rows tbl nm after} {
   reset_db
   do_execsql_test 1.$tn.0 $create
   if {$rows ne ""} { do_execsql_test 1.$tn.1 $rows }
-  do_execsql_test 1.$tn.2 "ALTER TABLE $tbl SET STRICT = ON" {}
+  do_execsql_test 1.$tn.2 "ALTER TABLE $tbl SET STRICT ON" {}
   do_execsql_test 1.$tn.3 {
     SELECT sql FROM sqlite_schema WHERE type='table' AND sql IS NOT NULL
   } [list $after]
@@ -173,7 +173,7 @@ foreach {tn create rows tbl nm after} {
   reset_db
   do_execsql_test 2.$tn.0 $create
   if {$rows ne ""} { do_execsql_test 2.$tn.1 $rows }
-  do_execsql_test 2.$tn.2 "ALTER TABLE $tbl SET STRICT = OFF" {}
+  do_execsql_test 2.$tn.2 "ALTER TABLE $tbl SET STRICT OFF" {}
   do_execsql_test 2.$tn.3 {
     SELECT sql FROM sqlite_schema WHERE type='table' AND sql IS NOT NULL
   } [list $after]
@@ -188,43 +188,43 @@ foreach {tn create rows tbl nm after} {
 #
 foreach {tn setup stmt err} {
  1   {CREATE TABLE t1(a VARCHAR(9), b INT);}
-     {ALTER TABLE t1 SET STRICT = ON}
+     {ALTER TABLE t1 SET STRICT ON}
      {unknown datatype for t1.a: "VARCHAR(9)"}
  2   {CREATE TABLE t1(a, b INT);}
-     {ALTER TABLE t1 SET STRICT = ON}
+     {ALTER TABLE t1 SET STRICT ON}
      {missing datatype for t1.a}
  3   {CREATE TABLE t1(a INT, b TEXT); INSERT INTO t1 VALUES('abc','x');}
-     {ALTER TABLE t1 SET STRICT = ON}
+     {ALTER TABLE t1 SET STRICT ON}
      {cannot set STRICT on t1: non-INT value in t1.a}
  4   {CREATE TABLE t1(a TEXT, b INT, PRIMARY KEY(a)); INSERT INTO t1 VALUES(NULL,1);}
-     {ALTER TABLE t1 SET STRICT = ON}
+     {ALTER TABLE t1 SET STRICT ON}
      {cannot set STRICT on t1: NULL value in t1.a}
  5   {CREATE TABLE t1(a ANY) STRICT; INSERT INTO t1 VALUES('123');}
-     {ALTER TABLE t1 SET STRICT = OFF}
+     {ALTER TABLE t1 SET STRICT OFF}
      {cannot unset STRICT on t1: TEXT value in t1.a}
  6   {CREATE TABLE t1(a INT);}
-     {ALTER TABLE t1 SET FOO = ON}
+     {ALTER TABLE t1 SET FOO ON}
      {unknown table option: FOO}
  7   {CREATE TABLE t1(a INT) STRICT;}
-     {ALTER TABLE t1 SET FOO = OFF}
+     {ALTER TABLE t1 SET FOO OFF}
      {unknown table option: FOO}
  8   {CREATE TABLE t1(a INT);}
-     {ALTER TABLE t1 SET STRICT = MAYBE}
+     {ALTER TABLE t1 SET STRICT MAYBE}
      {expected ON or OFF, got: MAYBE}
  9   {CREATE TABLE t1(a INT); CREATE VIEW v1 AS SELECT * FROM t1;}
-     {ALTER TABLE v1 SET STRICT = ON}
+     {ALTER TABLE v1 SET STRICT ON}
      {cannot set table options on view "v1"}
  10  {CREATE TABLE t1(a INT); CREATE VIEW v1 AS SELECT * FROM t1;}
-     {ALTER TABLE v1 SET STRICT = OFF}
+     {ALTER TABLE v1 SET STRICT OFF}
      {cannot set table options on view "v1"}
  11  {}
-     {ALTER TABLE nosuch SET STRICT = ON}
+     {ALTER TABLE nosuch SET STRICT ON}
      {no such table: nosuch}
  12  {}
-     {ALTER TABLE nosuch SET STRICT = OFF}
+     {ALTER TABLE nosuch SET STRICT OFF}
      {no such table: nosuch}
  13  {CREATE TABLE t1(a INTEGER PRIMARY KEY AUTOINCREMENT);}
-     {ALTER TABLE sqlite_sequence SET STRICT = ON}
+     {ALTER TABLE sqlite_sequence SET STRICT ON}
      {table sqlite_sequence may not be altered}
 } {
   reset_db
@@ -241,7 +241,7 @@ do_execsql_test 4.0 {
   INSERT INTO t1 VALUES('abc', 'x');
 }
 do_catchsql_test 4.1 {
-  ALTER TABLE t1 SET STRICT = ON;
+  ALTER TABLE t1 SET STRICT ON;
 } {1 {cannot set STRICT on t1: non-INT value in t1.a}}
 do_execsql_test 4.2 {
   SELECT sql FROM sqlite_schema WHERE name='t1'
@@ -263,7 +263,7 @@ do_execsql_test 5.0 {
   SELECT typeof(a) FROM t1;
 } {text}
 do_catchsql_test 5.1 {
-  ALTER TABLE t1 SET STRICT = OFF;
+  ALTER TABLE t1 SET STRICT OFF;
 } {1 {cannot unset STRICT on t1: TEXT value in t1.a}}
 do_execsql_test 5.2 {
   SELECT sql FROM sqlite_schema WHERE name='t1'
@@ -275,7 +275,7 @@ reset_db
 do_execsql_test 5.4 {
   CREATE TABLE t1(a ANY) STRICT;
   INSERT INTO t1 VALUES('abc');
-  ALTER TABLE t1 SET STRICT = OFF;
+  ALTER TABLE t1 SET STRICT OFF;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a ANY)}}
 do_execsql_test 5.5 { PRAGMA integrity_check } {ok}
@@ -286,15 +286,15 @@ do_execsql_test 5.5 { PRAGMA integrity_check } {ok}
 reset_db
 do_execsql_test 6.0 {
   CREATE TABLE t1(a INT, b TEXT);
-  ALTER TABLE t1 SET STRICT = ON;
-  ALTER TABLE t1 SET STRICT = OFF;
+  ALTER TABLE t1 SET STRICT ON;
+  ALTER TABLE t1 SET STRICT OFF;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT, b TEXT)}}
 
 do_execsql_test 6.1 {
   CREATE TABLE t2(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID;
-  ALTER TABLE t2 SET STRICT = ON;
-  ALTER TABLE t2 SET STRICT = OFF;
+  ALTER TABLE t2 SET STRICT ON;
+  ALTER TABLE t2 SET STRICT OFF;
   SELECT sql FROM sqlite_schema WHERE name='t2';
 } {{CREATE TABLE t2(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID}}
 
@@ -304,13 +304,13 @@ do_execsql_test 6.1 {
 reset_db
 do_execsql_test 7.0 {
   CREATE TABLE t1(a INT) STRICT;
-  ALTER TABLE t1 SET STRICT = ON;
+  ALTER TABLE t1 SET STRICT ON;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT) STRICT}}
 
 do_execsql_test 7.1 {
   CREATE TABLE t2(a INT);
-  ALTER TABLE t2 SET STRICT = OFF;
+  ALTER TABLE t2 SET STRICT OFF;
   SELECT sql FROM sqlite_schema WHERE name='t2';
 } {{CREATE TABLE t2(a INT)}}
 
@@ -320,22 +320,22 @@ do_execsql_test 7.1 {
 reset_db
 do_execsql_test 8.0 {
   CREATE TABLE t1(a INT);
-  ALTER TABLE t1 SET STRICT = "on";
+  ALTER TABLE t1 SET STRICT "on";
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT) STRICT}}
 
 do_execsql_test 8.1 {
-  ALTER TABLE t1 SET STRICT = 'off';
+  ALTER TABLE t1 SET STRICT 'off';
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT)}}
 
 do_catchsql_test 8.2 {
-  ALTER TABLE t1 SET STRICT = TRUE;
+  ALTER TABLE t1 SET STRICT TRUE;
 } {1 {expected ON or OFF, got: TRUE}}
 
 # The complaint about the value is not replaced by one about the table.
 do_catchsql_test 8.3 {
-  ALTER TABLE nosuch SET STRICT = TRUE;
+  ALTER TABLE nosuch SET STRICT TRUE;
 } {1 {expected ON or OFF, got: TRUE}}
 
 #-------------------------------------------------------------------------
@@ -347,12 +347,12 @@ do_execsql_test 9.0 {
   CREATE INDEX i1 ON t1(a);
   CREATE VIEW v1 AS SELECT a FROM t1;
   CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END;
-  ALTER TABLE t1 SET STRICT = ON;
+  ALTER TABLE t1 SET STRICT ON;
   SELECT name, sql FROM sqlite_schema ORDER BY name;
 } {i1 {CREATE INDEX i1 ON t1(a)} r1 {CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END} t1 {CREATE TABLE t1(a INT, b TEXT) STRICT} v1 {CREATE VIEW v1 AS SELECT a FROM t1}}
 
 do_execsql_test 9.1 {
-  ALTER TABLE t1 SET STRICT = OFF;
+  ALTER TABLE t1 SET STRICT OFF;
   SELECT name, sql FROM sqlite_schema ORDER BY name;
 } {i1 {CREATE INDEX i1 ON t1(a)} r1 {CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END} t1 {CREATE TABLE t1(a INT, b TEXT)} v1 {CREATE VIEW v1 AS SELECT a FROM t1}}
 
@@ -366,7 +366,7 @@ do_execsql_test 10.0 {
   ;
 }
 do_execsql_test 10.1 {
-  ALTER TABLE t1 SET STRICT = ON;
+  ALTER TABLE t1 SET STRICT ON;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT) STRICT}}
 
@@ -377,21 +377,21 @@ reset_db
 do_execsql_test 11.0 {
   CREATE TABLE t1(a INT);
   BEGIN;
-  ALTER TABLE t1 SET STRICT = ON;
+  ALTER TABLE t1 SET STRICT ON;
   ROLLBACK;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT)}}
 
 do_execsql_test 11.1 {
   BEGIN;
-  ALTER TABLE t1 SET STRICT = ON;
+  ALTER TABLE t1 SET STRICT ON;
   COMMIT;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT) STRICT}}
 
 do_execsql_test 11.2 {
   BEGIN;
-  ALTER TABLE t1 SET STRICT = OFF;
+  ALTER TABLE t1 SET STRICT OFF;
   ROLLBACK;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT) STRICT}}
@@ -402,7 +402,7 @@ do_execsql_test 11.2 {
 reset_db
 do_execsql_test 12.0 {
   CREATE TEMP TABLE t1(a INT) STRICT;
-  ALTER TABLE t1 SET STRICT = OFF;
+  ALTER TABLE t1 SET STRICT OFF;
   SELECT sql FROM sqlite_temp_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT)}}
 

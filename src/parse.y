@@ -2013,11 +2013,11 @@ cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) LP(A) expr(E) RP(B) onconf. {
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) SET TYPE typetoken(Z). {
   sqlite3AlterSetColumnType(pParse, X, &Y, &Z);
 }
-cmd ::= ALTER TABLE fullname(X) SET nm(Y) EQ onoff(Z). {
+cmd ::= ALTER TABLE fullname(X) SET nm(Y) onoff(Z). {
   sqlite3AlterSetTableOption(pParse, X, &Y, Z);
 }
 
-// The right-hand side of "ALTER TABLE ... SET <option> = ".  ON is a
+// The right-hand side of "ALTER TABLE ... SET <option>".  ON is a
 // keyword so it arrives as its own terminal; OFF is not, so it arrives as
 // an identifier.  Accepting nm here also lets either word be quoted.
 //
