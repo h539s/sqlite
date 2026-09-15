@@ -82,6 +82,12 @@ foreach {tn before after} {
 }
 
 #-------------------------------------------------------------------------
+# The stored statement is truncated on purpose, so it no longer parses.
+# DROP CONSTRAINT finds its constraint by scanning, but it checks the text
+# against the live table before editing it, so it refuses and leaves the
+# text alone.  The scanner on its own used to edit it down to
+# "CREATE TABLE x1(a, b ".
+#
 reset_db
 do_execsql_test 5.0 {
   CREATE TABLE x1(a, b CONSTRAINT ott REFERENCES x2);
@@ -89,13 +95,13 @@ do_execsql_test 5.0 {
   UPDATE sqlite_schema SET sql='CREATE TABLE x1(a, b CONSTRAINT ott REFERENCES';
 }
 
-do_execsql_test 5.1 {
+do_catchsql_test 5.1 {
   ALTER TABLE x1 DROP CONSTRAINT ott;
-}
+} {1 {database disk image is malformed}}
 
 do_execsql_test 5.2 {
   SELECT sql FROM sqlite_schema
-} {{CREATE TABLE x1(a, b }}
+} {{CREATE TABLE x1(a, b CONSTRAINT ott REFERENCES}}
 
 finish_test
 
