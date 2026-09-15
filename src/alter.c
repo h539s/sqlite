@@ -2595,6 +2595,22 @@ void sqlite3ColDefLocExtend(Parse *pParse){
   pLoc->t.n = (unsigned)notNullRtrim(pLoc->t.z, zLimit);
 }
 
+/*
+** Record where a CHECK constraint sits, so that ALTER TABLE ... DROP CHECK
+** can cut it out without looking for it.
+**
+** pKw is the CHECK keyword.  sqlite3ConsLocAdd() takes in everything that
+** follows it up to the end of the last real token - the parenthesised
+** expression, and the ON CONFLICT clause a table-level CHECK may carry -
+** and an immediately preceding "CONSTRAINT <name>".
+**
+** bCol says which form was written.  SQLite draws no distinction between
+** the two: pTab->pCheck is a flat list, a CHECK written on a column may
+** refer to any column of the table, and it is enforced exactly as a
+** table-level one is.  The only thing that makes a CHECK belong to a
+** column is that it was written inside that column's definition, so that
+** is what is recorded here and what DROP CHECK goes by.
+*/
 void sqlite3CheckLocAdd(Parse *pParse, Token *pKw, int bCol){
   Table *p = pParse->pNewTable;
   int iCol = -1;
@@ -3099,6 +3115,7 @@ static void dropColConsFunc(
     goto drop_notnull_cleanup;
   }
   if( zCol==0 ){
+    /* Every clause of this kind, wherever it was written. */
     iCol = -2;
     goto drop_notnull_edit;
   }
@@ -3181,6 +3198,14 @@ static void dropDefaultFunc(
   dropColConsFunc(ctx, argv, PARSELOC_Default, 0);
 }
 
+/*
+** Internal SQL function sqlite_drop_check(ISCHEMA, SQL, COLNAME).
+**
+** A NULL COLNAME removes every CHECK the table has, wherever it was
+** written.  Otherwise only those written inside that column's definition
+** go; a table-level CHECK that happens to mention the column stays, since
+** it was not written as part of it.
+*/
 static void dropCheckFunc(
   sqlite3_context *ctx,
   int NotUsed,
@@ -5189,6 +5214,14 @@ drop_fk_exit:
   sqlite3ExprListDelete(db, pToCol);
 }
 
+/*
+** Implement "ALTER TABLE <table> DROP CHECK", the form that names no
+** column.  Every CHECK the table has goes, whether it was written inside a
+** column definition or at the end of the list.
+**
+** The form that does name a column goes through sqlite3AlterDropConstraint()
+** like the other per-column editors; only the target differs.
+*/
 void sqlite3AlterDropCheck(Parse *pParse, SrcList *pSrc){
   Table *pTab;
   int iDb = 0;
