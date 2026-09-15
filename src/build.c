@@ -4707,6 +4707,16 @@ void sqlite3DefaultRowEst(Index *pIdx){
   if( IsUniqueIndex(pIdx) ) a[pIdx->nKeyCol] = 0;
 }
 
+/*
+** Generate code that removes index pIndex from schema iDb: its row in the
+** schema table, its entries in the stat tables, its b-tree, and its place
+** in the in-memory schema.
+**
+** Split out of sqlite3DropIndex() because ALTER TABLE needs the same code
+** for the automatic index that goes with a PRIMARY KEY - an index
+** sqlite3DropIndex() itself refuses to touch, since DROP INDEX may not be
+** used on one.
+*/
 void sqlite3CodeDropIndex(Parse *pParse, Index *pIndex, int iDb){
   sqlite3 *db = pParse->db;
   Vdbe *v = sqlite3GetVdbe(pParse);
