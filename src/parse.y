@@ -398,6 +398,8 @@ ccons ::= CONSTRAINT(C) nm(X). {
   pParse->u1.cr.zConsKw = C.z;
   pParse->u1.cr.zConsEnd = &X.z[X.n];
 }
+// Each of these records where the clause sits, for ALTER TABLE ...
+// DROP CONSTRAINT DEFAULT.  Only during the reparse of a stored statement.
 ccons ::= DEFAULT(D) scantok(A) term(X). {
   sqlite3AddDefaultValue(pParse,X,A.z,&A.z[A.n]);
   if( IN_RENAME_OBJECT ) sqlite3DefaultLocAdd(pParse, &D);
@@ -1945,11 +1947,15 @@ cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT nm(Y). {
   sqlite3AlterDropConstraint(pParse, X, &Y, 0, 0);
 }
 // A PRIMARY KEY need not have a name, so it is dropped by kind rather than
-// by name.  PRIMARY is an identifier fallback, so "DROP CONSTRAINT PRIMARY"
-// still names a constraint; only the two words together mean the key.
+// by name.  PRIMARY is a reserved word, not an identifier fallback, so this
+// cannot collide with dropping a constraint that is named "primary": such a
+// name has to be quoted, and a quoted one is an ID.
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT PRIMARY KEY. {
   sqlite3AlterDropPrimaryKey(pParse, X);
 }
+// A DEFAULT need not have a name either, and it belongs to one column, so
+// the column is named instead.  DEFAULT is reserved on the same reasoning
+// as PRIMARY above.
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT DEFAULT nm(Y). {
   sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_default");
 }

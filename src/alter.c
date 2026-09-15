@@ -758,13 +758,26 @@ struct RenameToken {
 **                      there becomes a constraint on that column.  Exactly
 **                      one entry per column.
 **
+**   PARSELOC_PrimaryKey
+**                      The extent of a PRIMARY KEY clause, taken in by
+**                      ALTER TABLE ... DROP CONSTRAINT PRIMARY KEY.  A
+**                      table has at most one, written either on a column
+**                      or on the table, so iCol is -1 for both forms and
+**                      the clause is found by kind.
+**
+**   PARSELOC_Default   The extent of a DEFAULT clause, taken in by
+**                      ALTER TABLE ... DROP CONSTRAINT DEFAULT.  A column
+**                      can carry more than one - SQLite lets the last win
+**                      - so there can be several entries with the same
+**                      iCol.
+**
 ** Objects are only created while IN_RENAME_OBJECT, which means only during
 ** the reparse of a stored schema statement performed by renameParseSql().
 ** The extent t therefore always points into the same string that the
 ** caller is about to edit.
 **
-** Created by sqlite3ParseLocAdd() and consumed by dropNotNullFunc() and
-** insertConstraintFunc(), all further down in this file.
+** Created by sqlite3ParseLocAdd() and consumed by dropColConsFunc(),
+** dropPkFunc() and insertConstraintFunc(), all further down in this file.
 */
 struct ParseLoc {
   u8 eType;              /* One of the PARSELOC_* values */
@@ -2582,6 +2595,18 @@ void sqlite3ColDefLocExtend(Parse *pParse){
   pLoc->t.n = (unsigned)notNullRtrim(pLoc->t.z, zLimit);
 }
 
+/*
+** Record where a column's DEFAULT clause sits, so that ALTER TABLE ...
+** DROP CONSTRAINT DEFAULT can cut it out without looking for it.
+**
+** pKw is the DEFAULT keyword.  sqlite3ConsLocAdd() takes in everything that
+** follows it up to the end of the last real token - the value, however it
+** was written - and an immediately preceding "CONSTRAINT <name>".
+**
+** The clause belongs to the column being defined, which is the last one
+** added so far.  The five grammar rules for DEFAULT all reduce while that
+** is still true.
+*/
 void sqlite3DefaultLocAdd(Parse *pParse, Token *pKw){
   Table *p = pParse->pNewTable;
   assert( IN_RENAME_OBJECT );
@@ -2888,6 +2913,7 @@ static void dropConstraintFunc(
     sqlite3_result_text(ctx, zNew, -1, SQLITE_DYNAMIC);
   }
 }
+
 
 /*
 ** Find the column named zCol in pTab, which is a table as just reparsed out
