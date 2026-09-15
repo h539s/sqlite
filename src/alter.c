@@ -2551,6 +2551,17 @@ void sqlite3NotNullLocAdd(
   sqlite3ParseLocAdd(pParse, PARSELOC_NotNull, iCol, zStart, zEnd);
 }
 
+/*
+** Widen the recorded extent of the column being parsed so that it reaches
+** the end of the constraint just reduced.  Called once per column
+** constraint, so the last call for a column leaves the extent ending where
+** that column's definition ends - which is where ALTER TABLE splices a new
+** column-constraint in, and matches where one written by hand would go.
+**
+** Parse.sLastToken holds the parser's lookahead, the first token after the
+** constraint, so it bounds the extent from above; notNullRtrim() pulls it
+** back to the last real token.
+*/
 void sqlite3ColDefLocExtend(Parse *pParse){
   Table *p = pParse->pNewTable;
   ParseLoc *pLoc;
@@ -2985,6 +2996,9 @@ drop_notnull_done:
 #endif
   if( rc!=SQLITE_OK ){
     if( rc==SQLITE_ERROR && sqlite3WritableSchema(db) ){
+      /* The stored statement does not parse.  Under writable_schema that is
+      ** the user's own doing, and the answer the other ALTER TABLE functions
+      ** give is the text back unchanged - see renameColumnFunc(). */
       sqlite3_result_value(ctx, argv[1]);
     }else{
       sqlite3_result_error_code(ctx, rc);
@@ -3008,10 +3022,8 @@ drop_notnull_done:
 **
 ** Neither position is found by searching.  The statement is reparsed and
 ** both come from what the parser recorded during that parse: Parse.zConsIns
-** for the closing ")", and the PARSELOC_ColDef entry for the column.  The
-** only text work left is stepping back over whitespace and comments in
-** front of the ")", which is cosmetic - "a INT )" would otherwise become
-** "a INT , CONSTRAINT ...".
+** for the closing ")", and the PARSELOC_ColDef entry for the column, whose
+** extent ends where that column's definition does.  No text work is left.
 */
 static void insertConstraintFunc(
   sqlite3_context *ctx,
@@ -3085,6 +3097,8 @@ insert_cons_done:
 #endif
   if( rc!=SQLITE_OK ){
     if( rc==SQLITE_ERROR && sqlite3WritableSchema(db) ){
+      /* As in dropNotNullFunc(): a statement that does not parse is handed
+      ** back unchanged rather than failing, when writable_schema is on. */
       sqlite3_result_value(ctx, argv[1]);
     }else{
       sqlite3_result_error_code(ctx, rc);
