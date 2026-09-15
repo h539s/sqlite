@@ -425,6 +425,8 @@ ccons ::= NOT(N) NULL(M) onconf(R).
                                  {sqlite3AddNotNull(pParse, R, N.z, &M.z[M.n]);}
 ccons ::= PRIMARY(P) KEY sortorder(Z) onconf(R) autoinc(I). {
   sqlite3AddPrimaryKey(pParse,0,R,I,Z);
+  /* Record where the clause sits, for ALTER TABLE ... DROP CONSTRAINT
+  ** PRIMARY KEY.  Only during the reparse of a stored statement. */
   if( IN_RENAME_OBJECT ){
     sqlite3ConsLocAdd(pParse, PARSELOC_PrimaryKey, -1, P.z, &P.z[P.n]);
   }
@@ -483,6 +485,8 @@ tconscomma ::= .
 tcons ::= CONSTRAINT(C) nm(X).  {
   ASSERT_IS_CREATE;
   pParse->u1.cr.constraintName = X;
+  /* Same record as the column-constraint rule keeps, so that a clause which
+  ** is dropped takes its name with it. */
   pParse->u1.cr.zConsKw = C.z;
   pParse->u1.cr.zConsEnd = &X.z[X.n];
 }
@@ -1932,6 +1936,9 @@ cmd ::= ALTER TABLE fullname(X) RENAME kwcolumn_opt nm(Y) TO nm(Z). {
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT nm(Y). {
   sqlite3AlterDropConstraint(pParse, X, &Y, 0);
 }
+// A PRIMARY KEY need not have a name, so it is dropped by kind rather than
+// by name.  PRIMARY is an identifier fallback, so "DROP CONSTRAINT PRIMARY"
+// still names a constraint; only the two words together mean the key.
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT PRIMARY KEY. {
   sqlite3AlterDropPrimaryKey(pParse, X);
 }
