@@ -1995,7 +1995,7 @@ cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) DROP CHECK. {
   sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_check");
 }
 cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) DROP NOT NULL. {
-  sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_notnull");
+  sqlite3AlterDropConstraint(pParse, X, 0, &Y);
 }
 cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) SET NOT(Z) NULL onconf. {
   sqlite3AlterSetNotNull(pParse, X, &Y, &Z);

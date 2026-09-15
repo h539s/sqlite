@@ -283,7 +283,7 @@ do_catchsql_test 5.7 {
 
 #-------------------------------------------------------------------------
 # 6.*: nothing to drop is a no-op rather than an error, in either form.
-# This follows DROP NOT NULL and DROP CONSTRAINT DEFAULT.
+# This follows DROP CONSTRAINT DEFAULT.
 #
 reset_db
 do_execsql_test 6.1 {

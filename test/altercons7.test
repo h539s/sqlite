@@ -23,8 +23,8 @@
 # last one win; all of them are removed.
 #
 # The column is resolved by name against the stored statement - see
-# alterColumnIndex() - which is what sqlite_drop_notnull() does, whose
-# implementation this one shares.
+# alterColumnIndex() - whose implementation sqlite_drop_default() shares -
+# resolves the column name
 #
 
 set testdir [file dirname $argv0]

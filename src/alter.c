@@ -747,11 +747,6 @@ struct RenameToken {
 **
 ** eType says what was recorded:
 **
-**   PARSELOC_NotNull   The extent of a NOT NULL constraint, taken in by
-**                      ALTER TABLE ... DROP NOT NULL.  A column can carry
-**                      more than one, so there can be several entries with
-**                      the same iCol.
-**
 **   PARSELOC_ColDef    An insertion point inside a column definition: the
 **                      first byte past the column's type, or past its name
 **                      when the type was omitted.  Anything spliced in
@@ -1282,7 +1277,6 @@ static int renameParseSql(
     }
     for(pLoc=p->pLoc; pLoc; pLoc=pLoc->pNext){
       assert( pLoc->t.z>=zSql && &pLoc->t.z[pLoc->t.n]<=&zSql[nSql] );
-      assert( pLoc->eType!=PARSELOC_NotNull || pLoc->t.n>0 );
     }
   }
 #endif
@@ -2534,7 +2528,7 @@ static int notNullRtrim(const char *zStart, const char *zEnd){
 */
 void sqlite3ConsLocAdd(
   Parse *pParse,        /* Parsing context */
-  u8 eType,             /* PARSELOC_NotNull, _PrimaryKey or _Default */
+  u8 eType,             /* _PrimaryKey or _Default */
   int iCol,             /* Column being constrained, or -1 */
   const char *zStart,   /* First byte of the constraint keyword */
   const char *zEnd      /* First byte past that keyword */
@@ -2691,7 +2685,7 @@ void sqlite3DefaultLocAdd(Parse *pParse, Token *pKw){
 */
 void sqlite3ParseLocAdd(
   Parse *pParse,        /* Parsing context */
-  u8 eType,             /* PARSELOC_NotNull or PARSELOC_ColDef */
+  u8 eType,             /* PARSELOC_ColDef */
   int iCol,             /* Index of the column this belongs to */
   const char *zStart,   /* First byte of the extent */
   const char *zEnd      /* First byte past the extent */
@@ -3053,7 +3047,6 @@ static int alterExciseClause(
 /*
 ** Shared implementation of the internal SQL functions
 **
-**     sqlite_drop_notnull(ISCHEMA, SQL, COLNAME)
 **     sqlite_drop_default(ISCHEMA, SQL, COLNAME)
 **
 ** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
@@ -3099,7 +3092,7 @@ static void dropColConsFunc(
    || (zCol==0 && !bTabCons)
   ){
     rc = SQLITE_OK;
-    goto drop_notnull_done;
+    goto drop_colcons_done;
   }
   zDb = db->aDb[iSchema].zDbSName;
 
@@ -3108,18 +3101,18 @@ static void dropColConsFunc(
     /* The stored statement does not parse.  It is the definition of the very
     ** table being altered, so there is nothing sensible to do with it. */
     rc = SQLITE_CORRUPT_BKPT;
-    goto drop_notnull_cleanup;
+    goto drop_colcons_cleanup;
   }
   pTab = sParse.pNewTable;
   if( pTab==0 || !IsOrdinaryTable(pTab) ){
     rc = SQLITE_CORRUPT_BKPT;
-    goto drop_notnull_cleanup;
+    goto drop_colcons_cleanup;
   }
   if( zCol==0 ){
     /* No column named: the clauses written at table level, which are the
     ** ones recorded against no column. */
     iCol = -1;
-    goto drop_notnull_edit;
+    goto drop_colcons_edit;
   }
   iCol = alterColumnIndex(pTab, zCol);
   if( iCol<0 ){
@@ -3128,15 +3121,15 @@ static void dropColConsFunc(
     ** such column", not a corrupt statement. */
     errorMPrintf(ctx, "no such column: %s", zCol);
     rc = SQLITE_OK;
-    goto drop_notnull_cleanup;
+    goto drop_colcons_cleanup;
   }
 
-drop_notnull_edit:
+drop_colcons_edit:
   nOut = sqlite3Strlen30(zSql);
   zOut = sqlite3DbMallocRaw(db, (i64)nOut+1);
   if( zOut==0 ){
     rc = SQLITE_NOMEM_BKPT;
-    goto drop_notnull_cleanup;
+    goto drop_colcons_cleanup;
   }
   memcpy(zOut, zSql, (size_t)nOut+1);
 
@@ -3163,29 +3156,17 @@ drop_notnull_edit:
 
   sqlite3_result_text(ctx, zOut, nOut, SQLITE_TRANSIENT);
 
-drop_notnull_cleanup:
+drop_colcons_cleanup:
   renameParseCleanup(&sParse);
   sqlite3DbFree(db, zOut);
 
-drop_notnull_done:
+drop_colcons_done:
 #ifndef SQLITE_OMIT_AUTHORIZATION
   db->xAuth = xAuth;
 #endif
   if( rc!=SQLITE_OK ){
     sqlite3_result_error_code(ctx, rc);
   }
-}
-
-/*
-** Internal SQL function sqlite_drop_notnull(ISCHEMA, SQL, COLNAME).
-*/
-static void dropNotNullFunc(
-  sqlite3_context *ctx,
-  int NotUsed,
-  sqlite3_value **argv
-){
-  UNUSED_PARAMETER(NotUsed);
-  dropColConsFunc(ctx, argv, PARSELOC_NotNull, 0);
 }
 
 /*
@@ -3545,22 +3526,17 @@ void sqlite3AlterSetNotNull(
   int iDb = 0;
   const char *zDb = 0;
   const char *pCons = 0;
-  char *zCol = 0;
   int nCons = 0;
 
   /* Look up the table being altered. */
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0, 2);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0);
   if( !pTab ) return;
 
-  /* Find the column being altered.  alterFindCol() authorizes the change and
-  ** reports an unknown column; the index it returns is not used, because the
-  ** editors resolve the name against the text they are about to edit. */
+  /* Find the column being altered. */
   if( alterFindCol(pParse, pTab, pCol, &iCol) ){
     return;
   }
-  zCol = sqlite3NameFromToken(pParse->db, pCol);
-  if( zCol==0 ) return;
 
   /* Find the length in bytes of the constraint definition */
   pCons = pFirst->z;
@@ -3576,12 +3552,10 @@ void sqlite3AlterSetNotNull(
   /* Edit the SQL for the named table. */
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_insert_constraint(%d, "
-              "sqlite_drop_notnull(%d, sql, %Q), %.*Q, %Q) "
+      "sql = sqlite_add_constraint(sqlite_drop_constraint(sql, %d), %.*Q, %d) "
       "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iDb, iDb, zCol, nCons, pCons, zCol, pTab->zName
+      , zDb, iCol, nCons, pCons, iCol, pTab->zName
   );
-  sqlite3DbFree(pParse->db, zCol);
 
   /* Finally, reload the database schema. */
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
@@ -5659,7 +5633,6 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_drop_column,    3, dropColumnFunc),
     INTERNAL_FUNCTION(sqlite_rename_quotefix,2, renameQuotefixFunc),
     INTERNAL_FUNCTION(sqlite_drop_constraint,2, dropConstraintFunc),
-    INTERNAL_FUNCTION(sqlite_drop_notnull,   3, dropNotNullFunc),
     INTERNAL_FUNCTION(sqlite_drop_default,   3, dropDefaultFunc),
     INTERNAL_FUNCTION(sqlite_drop_check,     3, dropCheckFunc),
     INTERNAL_FUNCTION(sqlite_set_coltype,    4, setColTypeFunc),

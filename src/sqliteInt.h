@@ -5120,7 +5120,7 @@ void sqlite3StartTable(Parse*,Token*,Token*,int,int,int,int);
 # define sqlite3ColumnPropertiesFromName(T,C) /* no-op */
 #endif
 void sqlite3AddColumn(Parse*,Token,Token);
-void sqlite3AddNotNull(Parse*, int, const char*, const char*);
+void sqlite3AddNotNull(Parse*, int);
 void sqlite3AddPrimaryKey(Parse*, ExprList*, int, int, int);
 void sqlite3AddCheckConstraint(Parse*, Expr*, const char*, const char*);
 void sqlite3AddDefaultValue(Parse*,Expr*,const char*,const char*);
@@ -5645,7 +5645,6 @@ void sqlite3CheckLocAdd(Parse*, Token*, int);
 void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 /* Allowed values for the second argument to sqlite3ParseLocAdd().  See the
 ** comment on struct ParseLoc in alter.c for what each one records. */
-#define PARSELOC_NotNull  1
 #define PARSELOC_ColDef   2
 #define PARSELOC_PrimaryKey 3
 #define PARSELOC_Default   4
