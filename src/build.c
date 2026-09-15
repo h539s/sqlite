@@ -3856,6 +3856,10 @@ void sqlite3CreateForeignKey(
   p->u.tab.pFKey = pFKey;
   pFKey = 0;
 
+  /* Record where the clause sits, for ALTER TABLE ... DROP FOREIGN KEY.
+  ** Done here rather than in the grammar so that the recorded extents and
+  ** the FKey objects are created together: the editor pairs the two lists
+  ** off against each other, and both are built by prepending. */
   if( IN_RENAME_OBJECT && pStart!=0 ){
     sqlite3ConsLocAdd(pParse, PARSELOC_ForeignKey, -1,
                       pStart->z, &pStart->z[pStart->n]);
