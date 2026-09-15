@@ -3055,8 +3055,9 @@ drop_notnull_done:
 ** alterColumnIndex().
 **
 ** Neither position is found by searching.  The statement is reparsed and
-** both come from what the parser recorded during that parse: Parse.zConsIns
-** for the closing ")", and the PARSELOC_ColDef entry for the column, whose
+** both come from what the parser recorded during that parse:
+** Parse.sColListEnd for the closing ")", and the PARSELOC_ColDef entry for
+** the column, whose
 ** extent ends where that column's definition does.  No text work is left.
 */
 static void insertConstraintFunc(
@@ -4114,9 +4115,9 @@ static void setStrictFunc(
 ** "WITHOUT ROWID, STRICT", "STRICT , without rowid", a comment sitting
 ** between the two - none of which a scan for the STRICT keyword would
 ** handle without also working out which comma belongs to it.  The parser
-** already knows both facts this needs: where the list starts
-** (Parse.zTabOpt, recorded during the reparse) and which options the table
-** ends up with (TF_WithoutRowid).
+** already knows both facts this needs: where the list starts (just past
+** Parse.sColListEnd, recorded during the reparse) and which options the
+** table ends up with (TF_WithoutRowid).
 **
 ** A comment written inside the option list is dropped along with the rest
 ** of the list.  Comments anywhere else in the statement are untouched.
@@ -4351,8 +4352,8 @@ static int alterCollectDdl(
 ** replaced by the one implied by tabFlags, and its table name replaced by
 ** zNewName.  The caller frees the result.
 **
-** Neither edit is a search.  The option list is rebuilt from
-** Parse.zTabOpt, on the same reasoning as sqlite_unset_strict().  The name
+** Neither edit is a search.  The option list is rebuilt from what follows
+** Parse.sColListEnd, on the same reasoning as sqlite_unset_strict().  The name
 ** is located through its RenameToken, which is what sqlite_rename_table()
 ** uses, so a quoted or awkwardly spelled name needs no special handling.
 */
