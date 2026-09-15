@@ -5244,6 +5244,48 @@ void sqlite3AlterDropCheck(Parse *pParse, SrcList *pSrc){
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
 }
 
+/*
+** Internal SQL function:
+**
+**     sqlite_set_coltype(ISCHEMA, SQL, COLNAME, TYPENAME)
+**
+** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
+** copy of it with the declared type of column COLNAME replaced by
+** TYPENAME.  The column is resolved against SQL itself, and the extent of
+** the type it currently declares comes from what the parser recorded
+** during the reparse, so a column written without a type is handled by the
+** same code: its extent is empty and sits where a type would go.
+**
+** The change is refused unless it leaves the column's affinity alone.
+**
+** That is not caution, it is the difference between an edit and a rebuild.
+** A declared type is not just documentation: it fixes the column's
+** affinity, and affinity is applied when a value is written.  The rows
+** already in the table, and the keys already in every index over the
+** column, were written under the old one.  Changing it makes the file
+** disagree with its own schema:
+**
+**   *  PRAGMA integrity_check reports "TEXT value in t.a" once a TEXT
+**      column with an index is redeclared INTEGER;
+**   *  a lookup through that index stops finding the rows, because the
+**      key the query computes is no longer the key that was stored;
+**   *  a WITHOUT ROWID table fails integrity_check the same way, its rows
+**      being held in the index that its PRIMARY KEY defines.
+**
+** Putting that right means rewriting every row and rebuilding every index
+** - a table rebuild, which is out of reach of a text edit.  So the cases
+** that need one are refused rather than half-done, and what is left is
+** the change that only ever affected the declaration: one that keeps the
+** affinity, such as VARCHAR(20) to TEXT or INT to INTEGER.
+**
+** One such change is still refused.  Exactly the word INTEGER, on the
+** PRIMARY KEY of a rowid table, makes the column an alias for the rowid;
+** INT does not, though the two have the same affinity.  Crossing that
+** line either way changes where the values live: away from INTEGER they
+** would be read back as NULL, having never been in the record at all,
+** and towards it the table's automatic index becomes an orphan and the
+** schema will not load.
+*/
 static void setColTypeFunc(
   sqlite3_context *ctx,
   int NotUsed,
@@ -5341,6 +5383,8 @@ static void setColTypeFunc(
     }
   }
 
+  /* Splice the new type in.  A column that had none needs a space in front
+  ** of it; one that had a type is replaced where it stood. */
   nSql = sqlite3Strlen30(zSql);
   iStart = (int)(p->t.z - zSql);
   iEnd = iStart + (int)p->t.n;
@@ -5366,6 +5410,12 @@ set_coltype_done:
   }
 }
 
+/*
+** Implement "ALTER TABLE <table> COLUMN <column> SET TYPE <type>".
+**
+** Only the stored text changes.  What may and may not be asked for is
+** decided by setColTypeFunc(), against the statement it is about to edit.
+*/
 void sqlite3AlterSetColumnType(
   Parse *pParse,
   SrcList *pSrc,
@@ -5387,6 +5437,9 @@ void sqlite3AlterSetColumnType(
     sqlite3ErrorMsg(pParse, "no type given for column \"%T\"", pCol);
     return;
   }
+  /* alterFindCol() is what authorizes the change and reports an unknown
+  ** column; the index it returns is not used, the editor resolving the
+  ** name against the text it is about to edit. */
   if( alterFindCol(pParse, pTab, pCol, &iDummy) ) return;
   zCol = sqlite3NameFromToken(db, pCol);
   zType = sqlite3DbStrNDup(db, pType->z, pType->n);

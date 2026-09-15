@@ -1670,6 +1670,9 @@ void sqlite3AddColumn(Parse *pParse, Token sName, Token sType){
   if( zColEnd ){
     assert( IN_RENAME_OBJECT );
     sqlite3ParseLocAdd(pParse, PARSELOC_ColDef, p->nCol-1, zColEnd, zColEnd);
+    /* And the extent of the declared type itself, for ALTER TABLE ...
+    ** SET TYPE.  Empty, and positioned where one would go, when the column
+    ** was written without a type. */
     sqlite3ParseLocAdd(pParse, PARSELOC_ColType, p->nCol-1, zTypeStart,
                        zColEnd);
   }
