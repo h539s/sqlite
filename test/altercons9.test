@@ -13,18 +13,23 @@
 #
 #   ALTER TABLE <table> [COLUMN <column>] DROP CHECK
 #
-# Naming no column removes every CHECK the table has.  Naming one removes
-# the CHECKs written inside that column's definition.
+# The two forms partition the table's CHECK constraints by where each one
+# was written.  Naming a column removes the CHECKs written inside that
+# column's definition; naming none removes the CHECKs written at table
+# level, after the column list.  Neither reaches the other's.
 #
-# SQLite draws no distinction between the two places a CHECK can be
-# written: Table.pCheck is a flat list, a CHECK written on a column may
-# refer to any column of the table, and it is enforced exactly as a
-# table-level one is.  What makes a CHECK belong to a column is therefore
-# only that it was written inside that column's definition - which is what
-# the parser records (PARSELOC_Check) and what the column form goes by.  A
-# table-level CHECK that mentions the column is left alone.
+# Where a CHECK was written is all there is to go on.  SQLite draws no
+# distinction between the two places: Table.pCheck is a flat list with no
+# column recorded against an entry, a CHECK written on a column may refer
+# to any column of the table, and it is enforced exactly as a table-level
+# one is.  So a table-level CHECK that mentions a column is not that
+# column's, and a column-level CHECK that mentions a different column
+# still is.  The parser records which it was (PARSELOC_Check), and that
+# is what these two forms go by.
 #
-# A CHECK need not have a name, so there is nothing to drop by name; and
+# COLUMN is required: "ALTER TABLE t c DROP CHECK" is a syntax error.
+#
+# A CHECK need not have a name, so there is nothing to reach by name; and
 # because the extent is recorded rather than searched for, an ON CONFLICT
 # clause and a "CONSTRAINT <name>" leave with the constraint.
 #
@@ -44,49 +49,48 @@ ifcapable !check {
 }
 
 #-------------------------------------------------------------------------
-# 1.*: no column named - every CHECK goes, wherever it was written.
+# 1.*: no column named - the CHECKs written at table level go, and only
+# those.  A CHECK written inside a column definition stays, whatever it
+# mentions.
 #
 foreach {tn before after} {
-  1 { CREATE TABLE t1(a CHECK(a>0), b) }
+  1 { CREATE TABLE t1(a, b, CHECK(a>0)) }
     { CREATE TABLE t1(a, b) }
 
-  2 { CREATE TABLE t1(a, b, CHECK(a>0)) }
-    { CREATE TABLE t1(a, b) }
+  2 { CREATE TABLE t1(a CHECK(a>0), b) }
+    { CREATE TABLE t1(a CHECK(a>0), b) }
 
   3 { CREATE TABLE t1(a CHECK(a>0), b CHECK(b>0), CHECK(a<b)) }
-    { CREATE TABLE t1(a, b) }
+    { CREATE TABLE t1(a CHECK(a>0), b CHECK(b>0)) }
 
   4 { CREATE TABLE t1(a, b, CONSTRAINT k CHECK(a>0)) }
     { CREATE TABLE t1(a, b) }
 
   5 { CREATE TABLE t1(a CONSTRAINT k CHECK(a>0), b) }
-    { CREATE TABLE t1(a, b) }
+    { CREATE TABLE t1(a CONSTRAINT k CHECK(a>0), b) }
 
   6 { CREATE TABLE t1(a, b, CHECK(a>0) ON CONFLICT FAIL) }
     { CREATE TABLE t1(a, b) }
 
-  7 { CREATE TABLE t1(a INT NOT NULL CHECK(a>0) DEFAULT 5, b) }
-    { CREATE TABLE t1(a INT NOT NULL DEFAULT 5, b) }
-
-  8 { CREATE TABLE t1(a, b, CHECK(a>0), UNIQUE(b), CHECK(b>0)) }
+  7 { CREATE TABLE t1(a, b, CHECK(a>0), UNIQUE(b), CHECK(b>0)) }
     { CREATE TABLE t1(a, b, UNIQUE(b)) }
 
-  9 { CREATE TABLE t1(a CHECK(a>0) CHECK(a<9), b) }
+  8 { CREATE TABLE t1(a CHECK(b>0), b, CHECK(a>0)) }
+    { CREATE TABLE t1(a CHECK(b>0), b) }
+
+  9 { CREATE TABLE t1(a, b, CHECK(a>0), CHECK(b>0), CHECK(a<b)) }
     { CREATE TABLE t1(a, b) }
 
   10 { CREATE TABLE t1(a, b) }
      { CREATE TABLE t1(a, b) }
 
-  11 { CREATE TABLE t1(a CHECK(a IN (1,2,3)), b) }
+  11 { CREATE TABLE t1(a INT NOT NULL DEFAULT 5, b, CHECK(a IN (1,2,3))) }
+     { CREATE TABLE t1(a INT NOT NULL DEFAULT 5, b) }
+
+  12 { CREATE TABLE t1(a, b, CHECK(a>0) /*go*/) }
      { CREATE TABLE t1(a, b) }
 
-  12 { CREATE TABLE t1(a TEXT PRIMARY KEY CHECK(length(a)>1), b) }
-     { CREATE TABLE t1(a TEXT PRIMARY KEY, b) }
-
-  13 { CREATE TABLE t1(a CHECK(a>0) /*go*/, b) }
-     { CREATE TABLE t1(a, b) }
-
-  14 { CREATE TABLE t1(a CHECK(a>0)) }
+  13 { CREATE TABLE t1(a, CHECK(a>0)) }
      { CREATE TABLE t1(a) }
 } {
   # No column may be lost along the way: compare against the table that
@@ -132,6 +136,9 @@ foreach {tn col before after} {
 
   6 a { CREATE TABLE t1(a CHECK(a>0), b) }
       { CREATE TABLE t1(a, b) }
+
+  7 a { CREATE TABLE t1(a, b) }
+      { CREATE TABLE t1(a, b) }
 } {
   reset_db
   do_execsql_test 2.$tn.1 $before
@@ -142,50 +149,77 @@ foreach {tn col before after} {
   do_execsql_test 2.$tn.3 { PRAGMA integrity_check } {ok}
 }
 
-# A table-level CHECK is not part of any column's definition, so naming a
-# column it mentions leaves it where it is.  This is the whole difference
-# between the two forms.
+#-------------------------------------------------------------------------
+# 3.*: neither form reaches the other's.  Where the constraint was
+# written decides, not what it mentions.
 #
-foreach {tn col before after} {
-  1 a { CREATE TABLE t1(a, b, CHECK(a>0)) }
-      { CREATE TABLE t1(a, b, CHECK(a>0)) }
+foreach {tn alter before after} {
+  1 {COLUMN a DROP CHECK}
+    { CREATE TABLE t1(a, b, CHECK(a>0)) }
+    { CREATE TABLE t1(a, b, CHECK(a>0)) }
 
-  2 a { CREATE TABLE t1(a CHECK(a>0), b, CHECK(a<9)) }
-      { CREATE TABLE t1(a, b, CHECK(a<9)) }
+  2 {DROP CHECK}
+    { CREATE TABLE t1(a CHECK(a>0), b) }
+    { CREATE TABLE t1(a CHECK(a>0), b) }
 
-  3 a { CREATE TABLE t1(a CHECK(b>0), b) }
-      { CREATE TABLE t1(a, b) }
+  3 {COLUMN a DROP CHECK}
+    { CREATE TABLE t1(a CHECK(a>0), b, CHECK(a<9)) }
+    { CREATE TABLE t1(a, b, CHECK(a<9)) }
 
-  4 b { CREATE TABLE t1(a CHECK(b>0), b) }
-      { CREATE TABLE t1(a CHECK(b>0), b) }
+  4 {DROP CHECK}
+    { CREATE TABLE t1(a CHECK(a>0), b, CHECK(a<9)) }
+    { CREATE TABLE t1(a CHECK(a>0), b) }
+
+  5 {COLUMN a DROP CHECK}
+    { CREATE TABLE t1(a CHECK(b>0), b) }
+    { CREATE TABLE t1(a, b) }
+
+  6 {COLUMN b DROP CHECK}
+    { CREATE TABLE t1(a CHECK(b>0), b) }
+    { CREATE TABLE t1(a CHECK(b>0), b) }
 } {
   reset_db
-  do_execsql_test 2.10.$tn.1 $before
-  do_execsql_test 2.10.$tn.2 "
-    ALTER TABLE t1 COLUMN $col DROP CHECK;
+  do_execsql_test 3.$tn.1 $before
+  do_execsql_test 3.$tn.2 "
+    ALTER TABLE t1 $alter;
     SELECT sql FROM sqlite_schema WHERE name='t1';
   " [list [string trim $after]]
 }
 
-# Case 2.10.3 and 2.10.4 together: a CHECK written on "a" that talks only
-# about "b" belongs to "a", because that is where it was written.  SQLite
-# enforces it either way - the constraint is not scoped to the column.
+# Together the two forms cover everything, and the order does not matter.
+#
+foreach {tn order} {
+  1 {{DROP CHECK} {COLUMN a DROP CHECK} {COLUMN b DROP CHECK}}
+  2 {{COLUMN b DROP CHECK} {COLUMN a DROP CHECK} {DROP CHECK}}
+  3 {{COLUMN a DROP CHECK} {DROP CHECK} {COLUMN b DROP CHECK}}
+} {
+  reset_db
+  execsql { CREATE TABLE t1(a CHECK(a>0), b CHECK(b>0), CHECK(a<b)) }
+  foreach alt $order { execsql "ALTER TABLE t1 $alt" }
+  do_execsql_test 3.10.$tn {
+    SELECT sql FROM sqlite_schema WHERE name='t1';
+  } {{CREATE TABLE t1(a, b)}}
+}
+
+# Why "where it was written" is the only rule available: SQLite enforces a
+# CHECK the same way wherever it sits, so a CHECK on "a" that talks only
+# about "b" is not "b"'s in any sense the engine knows about.
 #
 reset_db
-do_execsql_test 2.11.1 {
+do_execsql_test 3.11.1 {
   CREATE TABLE t1(a CHECK(b>0), b);
 }
-do_catchsql_test 2.11.2 {
+do_catchsql_test 3.11.2 {
   INSERT INTO t1 VALUES(1, -5);
 } {1 {CHECK constraint failed: b>0}}
 
 #-------------------------------------------------------------------------
-# 3.*: the result is the table that would have been created without the
-# constraints.
+# 4.*: the result is the table that would have been created without the
+# constraints that went.
 #
 foreach {tn alter before after} {
   1 {DROP CHECK}
-    { CREATE TABLE t1(a INT CHECK(a>0), b TEXT, c, CHECK(c IS NOT NULL)) }
+    { CREATE TABLE t1(a INT, b TEXT, c, CHECK(c IS NOT NULL)) }
     { CREATE TABLE t1(a INT, b TEXT, c) }
 
   2 {COLUMN a DROP CHECK}
@@ -205,146 +239,165 @@ foreach {tn alter before after} {
 
   reset_db
   execsql $before
-  do_execsql_test 3.$tn.1 "
+  do_execsql_test 4.$tn.1 "
     ALTER TABLE t1 $alter;
     $probe
   " $ref
-  do_execsql_test 3.$tn.2 { PRAGMA integrity_check } {ok}
+  do_execsql_test 4.$tn.2 { PRAGMA integrity_check } {ok}
 }
 
 #-------------------------------------------------------------------------
-# 4.*: the rows are untouched, what the constraint used to reject is now
-# accepted, and a constraint that was not dropped still bites.
+# 5.*: the rows are untouched, what went no longer bites, and what stayed
+# still does.
 #
 reset_db
-do_execsql_test 4.1 {
+do_execsql_test 5.1 {
   CREATE TABLE t1(a CHECK(a>0), b CHECK(b>0));
   INSERT INTO t1 VALUES(5, 5);
 }
-do_catchsql_test 4.2 {
+do_catchsql_test 5.2 {
   INSERT INTO t1 VALUES(-1, 5);
 } {1 {CHECK constraint failed: a>0}}
-do_execsql_test 4.3 {
+do_execsql_test 5.3 {
   ALTER TABLE t1 COLUMN a DROP CHECK;
   INSERT INTO t1 VALUES(-1, 5);
   SELECT a, b FROM t1 ORDER BY a;
 } {-1 5 5 5}
-do_catchsql_test 4.4 {
+do_catchsql_test 5.4 {
   INSERT INTO t1 VALUES(1, -5);
 } {1 {CHECK constraint failed: b>0}}
-do_execsql_test 4.5 { PRAGMA integrity_check } {ok}
+do_execsql_test 5.5 { PRAGMA integrity_check } {ok}
 
-# And with no column named, neither is left.
+# The table-level form, and that it leaves the column-level one enforcing.
 #
 reset_db
-do_execsql_test 4.6 {
-  CREATE TABLE t1(a CHECK(a>0), b CHECK(b>0));
+do_execsql_test 5.6 {
+  CREATE TABLE t1(a CHECK(a>0), b, CHECK(b>0));
   ALTER TABLE t1 DROP CHECK;
-  INSERT INTO t1 VALUES(-1, -5);
+  INSERT INTO t1 VALUES(1, -5);
   SELECT count(*) FROM t1;
 } {1}
+do_catchsql_test 5.7 {
+  INSERT INTO t1 VALUES(-1, 5);
+} {1 {CHECK constraint failed: a>0}}
 
 #-------------------------------------------------------------------------
-# 5.*: a table with no CHECK is left alone rather than refused, in either
-# form.  This follows what DROP NOT NULL and DROP CONSTRAINT DEFAULT do.
+# 6.*: nothing to drop is a no-op rather than an error, in either form.
+# This follows DROP NOT NULL and DROP CONSTRAINT DEFAULT.
 #
 reset_db
-do_execsql_test 5.1 {
+do_execsql_test 6.1 {
   CREATE TABLE t1(a, b);
   ALTER TABLE t1 DROP CHECK;
   ALTER TABLE t1 COLUMN a DROP CHECK;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a, b)}}
 
+# A table whose only CHECKs are the other form's.
+#
+reset_db
+do_execsql_test 6.2 {
+  CREATE TABLE t1(a CHECK(a>0), b);
+  ALTER TABLE t1 DROP CHECK;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a CHECK(a>0), b)}}
+
 # Twice in a row.
 #
 reset_db
-do_execsql_test 5.2 {
-  CREATE TABLE t1(a CHECK(a>0), b);
+do_execsql_test 6.3 {
+  CREATE TABLE t1(a, b, CHECK(a>0));
   ALTER TABLE t1 DROP CHECK;
   ALTER TABLE t1 DROP CHECK;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a, b)}}
 
 #-------------------------------------------------------------------------
-# 6.*: refusals.  Nothing is changed by one.
+# 7.*: refusals.  Nothing is changed by one.
 #
 reset_db
-do_execsql_test 6.0 { CREATE TABLE t1(a CHECK(a>0), b) }
-do_catchsql_test 6.1 {
+do_execsql_test 7.0 { CREATE TABLE t1(a CHECK(a>0), b, CHECK(b>0)) }
+
+# COLUMN is required - a bare column name is a syntax error.
+#
+do_catchsql_test 7.1 {
+  ALTER TABLE t1 a DROP CHECK;
+} {1 {near "a": syntax error}}
+
+do_catchsql_test 7.2 {
   ALTER TABLE t1 COLUMN zz DROP CHECK;
 } {1 {no such column: zz}}
-do_execsql_test 6.2 {
+do_execsql_test 7.3 {
   SELECT sql FROM sqlite_schema WHERE name='t1';
-} {{CREATE TABLE t1(a CHECK(a>0), b)}}
+} {{CREATE TABLE t1(a CHECK(a>0), b, CHECK(b>0))}}
 
-do_catchsql_test 6.3 {
+do_catchsql_test 7.4 {
   CREATE VIEW v1 AS SELECT 1 AS x;
   ALTER TABLE v1 DROP CHECK;
 } {1 {cannot edit constraints of view "v1"}}
 
-do_catchsql_test 6.4 {
+do_catchsql_test 7.5 {
   ALTER TABLE v1 COLUMN x DROP CHECK;
 } {1 {cannot edit constraints of view "v1"}}
 
-do_catchsql_test 6.5 {
+do_catchsql_test 7.6 {
   ALTER TABLE nosuchtable DROP CHECK;
 } {1 {no such table: nosuchtable}}
 
-do_catchsql_test 6.6 {
+do_catchsql_test 7.7 {
   ALTER TABLE sqlite_schema DROP CHECK;
 } {1 {table sqlite_master may not be altered}}
 
 #-------------------------------------------------------------------------
-# 7.*: the other schemas, and ROLLBACK.
+# 8.*: the other schemas, and ROLLBACK.
 #
 reset_db
 forcedelete test.db2
-do_execsql_test 7.1.0 {
+do_execsql_test 8.1.0 {
   ATTACH 'test.db2' AS aux;
-  CREATE TABLE aux.t1(a CHECK(a>0), b);
+  CREATE TABLE aux.t1(a CHECK(a>0), b, CHECK(b>0));
   INSERT INTO aux.t1 VALUES(1, 2);
 }
-do_execsql_test 7.1.1 {
+do_execsql_test 8.1.1 {
   ALTER TABLE aux.t1 DROP CHECK;
   SELECT sql FROM aux.sqlite_schema WHERE name='t1';
   SELECT a FROM aux.t1;
-} {{CREATE TABLE t1(a, b)} 1}
-do_execsql_test 7.1.2 { PRAGMA aux.integrity_check } {ok}
+} {{CREATE TABLE t1(a CHECK(a>0), b)} 1}
+do_execsql_test 8.1.2 { PRAGMA aux.integrity_check } {ok}
 
 reset_db
-do_execsql_test 7.2.0 {
+do_execsql_test 8.2.0 {
   CREATE TEMP TABLE t1(a CHECK(a>0), b CHECK(b>0));
   ALTER TABLE t1 COLUMN b DROP CHECK;
   SELECT sql FROM temp.sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a CHECK(a>0), b)}}
 
 reset_db
-do_execsql_test 7.3.0 {
-  CREATE TABLE t1(a CHECK(a>0), b);
+do_execsql_test 8.3.0 {
+  CREATE TABLE t1(a, b, CHECK(a>0));
   BEGIN;
     ALTER TABLE t1 DROP CHECK;
   ROLLBACK;
   SELECT sql FROM sqlite_schema WHERE name='t1';
-} {{CREATE TABLE t1(a CHECK(a>0), b)}}
+} {{CREATE TABLE t1(a, b, CHECK(a>0))}}
 
 #-------------------------------------------------------------------------
-# 8.*: an invalid stored statement is refused, and left alone.
+# 9.*: an invalid stored statement is refused, and left alone.
 #
 foreach {tn alter} {
   1 {ALTER TABLE t1 DROP CHECK}
   2 {ALTER TABLE t1 COLUMN a DROP CHECK}
 } {
   reset_db
-  do_execsql_test 8.$tn.0 {
-    CREATE TABLE t1(a CHECK(a>0), b);
+  do_execsql_test 9.$tn.0 {
+    CREATE TABLE t1(a CHECK(a>0), b, CHECK(b>0));
     PRAGMA writable_schema = 1;
     UPDATE sqlite_schema SET sql = 'CREATE TABLE t1(a CHECK(a>0), b'
      WHERE name = 't1';
     PRAGMA writable_schema = 0;
   }
-  do_catchsql_test 8.$tn.1 $alter {1 {database disk image is malformed}}
-  do_execsql_test 8.$tn.2 {
+  do_catchsql_test 9.$tn.1 $alter {1 {database disk image is malformed}}
+  do_execsql_test 9.$tn.2 {
     PRAGMA writable_schema = 1;
     SELECT sql FROM sqlite_schema WHERE type='table';
   } {{CREATE TABLE t1(a CHECK(a>0), b}}
