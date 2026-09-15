@@ -1958,6 +1958,10 @@ cmd ::= ALTER TABLE fullname(X) SET nm(Y) EQ onoff(Z). {
   sqlite3AlterSetTableOption(pParse, X, &Y, Z);
 }
 
+// The right-hand side of "ALTER TABLE ... SET <option> = ".  ON is a
+// keyword so it arrives as its own terminal; OFF is not, so it arrives as
+// an identifier.  Accepting nm here also lets either word be quoted.
+//
 %type onoff {int}
 onoff(A) ::= ON.       {A = 1;}
 onoff(A) ::= nm(X). {

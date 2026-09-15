@@ -4097,6 +4097,30 @@ static void setStrictFunc(
   sqlite3_result_text(ctx, zNew, -1, SQLITE_DYNAMIC);
 }
 
+/*
+** Internal SQL function:
+**
+**     sqlite_unset_strict(ISCHEMA, SQL)
+**
+** SQL is a CREATE TABLE statement belonging to schema ISCHEMA that carries
+** the STRICT table-option.  Return a copy of it with STRICT removed.
+**
+** The option list is not searched for STRICT and edited in place.  It is
+** regenerated: everything from the ")" that closes the column list to the
+** end of the statement is replaced by the list the table should have once
+** STRICT is gone, which is " WITHOUT ROWID" or nothing at all.
+**
+** That keeps this indifferent to how the list was written - "STRICT",
+** "WITHOUT ROWID, STRICT", "STRICT , without rowid", a comment sitting
+** between the two - none of which a scan for the STRICT keyword would
+** handle without also working out which comma belongs to it.  The parser
+** already knows both facts this needs: where the list starts
+** (Parse.zTabOpt, recorded during the reparse) and which options the table
+** ends up with (TF_WithoutRowid).
+**
+** A comment written inside the option list is dropped along with the rest
+** of the list.  Comments anywhere else in the statement are untouched.
+*/
 static void unsetStrictFunc(
   sqlite3_context *ctx,
   int NotUsed,
@@ -4127,6 +4151,7 @@ static void unsetStrictFunc(
   if( rc!=SQLITE_OK ) goto unset_strict_cleanup;
   pTab = sParse.pNewTable;
   if( pTab==0 || !IsOrdinaryTable(pTab) || sParse.zTabOpt==0 ){
+    /* This can happen if the sqlite_schema table is corrupt */
     rc = SQLITE_CORRUPT_BKPT;
     goto unset_strict_cleanup;
   }
@@ -4158,7 +4183,7 @@ unset_strict_done:
 /*
 ** Generate bytecode to implement:
 **
-**    ALTER TABLE pSrc SET <table-option> = ON
+**    ALTER TABLE pSrc SET <table-option> = ON|OFF
 **
 ** STRICT is the only table-option this understands.  WITHOUT ROWID cannot
 ** be turned on after the fact: it changes the on-disk representation of
@@ -4175,14 +4200,24 @@ unset_strict_done:
 **   (3) Every column of a non-INTEGER PRIMARY KEY acquires an implied NOT
 **       NULL, so no such column may already hold a NULL.
 **
-** (2) and (3) are exactly what PRAGMA quick_check reports once the table
-** is strict, so the schema text is edited first, the schema is reloaded,
-** and quick_check is then run against the new definition.  If it finds
-** anything the statement aborts and the schema edit is rolled back with
-** it.  This is the same shape sqlite3AlterFinishAddColumn() uses.
+** Turning it off is not simply the reverse.  It relaxes (1) and (3), but
+** it can still leave rows the new definition rejects, because an ANY
+** column has BLOB affinity while the table is strict and NUMERIC affinity
+** once it is not.  Text written into such a column while strict - '123',
+** say - is stored as text, and a NUMERIC column holding text that
+** converts losslessly to a number is precisely what quick_check reports
+** as "TEXT value in ...".  So the same check runs in both directions.
 **
-** No row data is rewritten.  STRICT constrains what may be written from
-** here on; it does not change how existing rows are stored.
+** (2) and (3), and the ANY case above, are all things PRAGMA quick_check
+** reports once the table has its new definition.  So in either direction
+** the schema text is edited first, the schema is reloaded, and quick_check
+** is run against the result.  If it finds anything the statement aborts
+** and the schema edit is rolled back with it.  This is the same shape
+** sqlite3AlterFinishAddColumn() uses.
+**
+** No row data is rewritten in either direction.  STRICT constrains what
+** may be written from here on; it does not change how existing rows are
+** stored.
 */
 void sqlite3AlterSetTableOption(
   Parse *pParse,    /* Parsing context */
@@ -4196,6 +4231,10 @@ void sqlite3AlterSetTableOption(
   int ii;
 
   assert( pSrc->nSrc==1 );
+
+  /* The grammar has already reported a right-hand side that is neither ON
+  ** nor OFF.  Return before looking the table up, so that a second and
+  ** less specific message does not replace that one. */
   if( bOn<0 ){
     sqlite3SrcListDelete(pParse->db, pSrc);
     return;
@@ -4209,11 +4248,9 @@ void sqlite3AlterSetTableOption(
     return;
   }
 
-  /* Turning STRICT on when it is already on changes nothing. */
-  if( pTab->tabFlags & TF_Strict ) return;
+  /* Setting the option to what it already is changes nothing. */
   if( ((pTab->tabFlags & TF_Strict)!=0)==(bOn!=0) ) return;
 
-  /* (1) Reject custom datatypes up front. */
   assert( IsOrdinaryTable(pTab) );
   if( bOn ){
     /* (1) Reject custom datatypes up front. */
@@ -4253,11 +4290,11 @@ void sqlite3AlterSetTableOption(
     );
   }
 
-  /* Reload the database schema, so that the checks below run against the
+  /* Reload the database schema, so that the check below runs against the
   ** table as it now is. */
   renameReloadSchema(pParse, iDb, INITFLAG_AlterSetOpt);
 
-  /* (2) and (3): search for a row that the new definition rejects. */
+  /* Search for a row that the new definition rejects. */
   pParse->colNamesSet = 1;
   sqlite3NestedParse(pParse,
       "SELECT sqlite_fail('cannot %s STRICT on %q: ' || quick_check, %d) "
