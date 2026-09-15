@@ -760,12 +760,6 @@ struct RenameToken {
 **                      or on the table, so iCol is -1 for both forms and
 **                      the clause is found by kind.
 **
-**   PARSELOC_Default   The extent of a DEFAULT clause, taken in by
-**                      ALTER TABLE ... DROP CONSTRAINT DEFAULT.  A column
-**                      can carry more than one - SQLite lets the last win
-**                      - so there can be several entries with the same
-**                      iCol.
-**
 ** Objects are only created while IN_RENAME_OBJECT, which means only during
 ** the reparse of a stored schema statement performed by renameParseSql().
 ** The extent t therefore always points into the same string that the
@@ -2656,26 +2650,6 @@ void sqlite3FkLocExtend(Parse *pParse, const char *zEnd){
 }
 
 /*
-** Record where a column's DEFAULT clause sits, so that ALTER TABLE ...
-** DROP CONSTRAINT DEFAULT can cut it out without looking for it.
-**
-** pKw is the DEFAULT keyword.  sqlite3ConsLocAdd() takes in everything that
-** follows it up to the end of the last real token - the value, however it
-** was written - and an immediately preceding "CONSTRAINT <name>".
-**
-** The clause belongs to the column being defined, which is the last one
-** added so far.  The five grammar rules for DEFAULT all reduce while that
-** is still true.
-*/
-void sqlite3DefaultLocAdd(Parse *pParse, Token *pKw){
-  Table *p = pParse->pNewTable;
-  assert( IN_RENAME_OBJECT );
-  if( p==0 || p->nCol<=0 ) return;
-  sqlite3ConsLocAdd(pParse, PARSELOC_Default, p->nCol-1,
-                    pKw->z, &pKw->z[pKw->n]);
-}
-
-/*
 ** Record one position within the text being parsed.  See the comment on
 ** struct ParseLoc for what the eType values mean.  zEnd may equal zStart,
 ** which records a bare position rather than an extent.
@@ -3047,8 +3021,6 @@ static int alterExciseClause(
 /*
 ** Shared implementation of the internal SQL functions
 **
-**     sqlite_drop_default(ISCHEMA, SQL, COLNAME)
-**
 ** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
 ** copy of that statement with every constraint of kind eType on the column
 ** named COLNAME removed.  The name is resolved against SQL itself - see
@@ -3167,18 +3139,6 @@ drop_colcons_done:
   if( rc!=SQLITE_OK ){
     sqlite3_result_error_code(ctx, rc);
   }
-}
-
-/*
-** Internal SQL function sqlite_drop_default(ISCHEMA, SQL, COLNAME).
-*/
-static void dropDefaultFunc(
-  sqlite3_context *ctx,
-  int NotUsed,
-  sqlite3_value **argv
-){
-  UNUSED_PARAMETER(NotUsed);
-  dropColConsFunc(ctx, argv, PARSELOC_Default, 0);
 }
 
 /*
@@ -5379,7 +5339,6 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_drop_column,    3, dropColumnFunc),
     INTERNAL_FUNCTION(sqlite_rename_quotefix,2, renameQuotefixFunc),
     INTERNAL_FUNCTION(sqlite_drop_constraint,2, dropConstraintFunc),
-    INTERNAL_FUNCTION(sqlite_drop_default,   3, dropDefaultFunc),
     INTERNAL_FUNCTION(sqlite_drop_check,     3, dropCheckFunc),
     INTERNAL_FUNCTION(sqlite_set_coltype,    4, setColTypeFunc),
     INTERNAL_FUNCTION(sqlite_drop_fk,       -1, dropFkFunc),

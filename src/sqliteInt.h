@@ -5631,7 +5631,6 @@ void sqlite3AlterSetColumnType(Parse*, SrcList*, Token*, Token*);
 void sqlite3ConsLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ColDefLocExtend(Parse*);
-void sqlite3DefaultLocAdd(Parse*, Token*);
 void sqlite3FkLocExtend(Parse*, const char*);
 void sqlite3CheckLocAdd(Parse*, Token*, int);
 void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
@@ -5639,7 +5638,6 @@ void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 ** comment on struct ParseLoc in alter.c for what each one records. */
 #define PARSELOC_ColDef   2
 #define PARSELOC_PrimaryKey 3
-#define PARSELOC_Default   4
 #define PARSELOC_ForeignKey 5
 #define PARSELOC_Check     6
 #define PARSELOC_ColType   7
