@@ -3086,6 +3086,12 @@ void sqlite3EndTable(
 #ifndef SQLITE_OMIT_ALTERTABLE
   if( !pSelect && IsOrdinaryTable(p) ){
     assert( pCons && pEnd );
+
+    /* Remember where the table-option list begins - the first byte after
+    ** the ")" that closes the column list.  ALTER TABLE ... SET <option>
+    ** rewrites that list wholesale rather than hunting for one option
+    ** inside it.  Only useful while reparsing a stored statement, so it is
+    ** not worth a field in the Table object. */
     if( IN_RENAME_OBJECT ){
       pParse->zTabOpt = &pEnd->z[pEnd->n];
     }
