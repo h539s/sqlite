@@ -3237,9 +3237,14 @@ static Table *alterFindTable(
 ** Generate bytecode for one of:
 **
 **  (1)   ALTER TABLE pSrc DROP CONSTRAINT pCons
-**  (2)   ALTER TABLE pSrc ALTER pCol DROP NOT NULL
+**  (2)   ALTER TABLE pSrc ALTER pCol DROP <kind>
 **
 ** One of pCons and pCol must be NULL and the other non-null.
+**
+** Form (1) drops a constraint the user named, whatever kind it is, so the
+** editor is fixed.  Form (2) drops constraints of one kind off a named
+** column, and zFunc is the editor that knows which kind: every one of them
+** takes (ISCHEMA, SQL, COLNAME) and returns the edited statement.
 */
 void sqlite3AlterDropConstraint(
   Parse *pParse,     /* Parsing context */
