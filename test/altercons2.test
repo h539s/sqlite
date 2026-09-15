@@ -23,48 +23,48 @@ ifcapable !altertable {
 # These cases corrupt the stored CREATE TABLE with writable_schema and then
 # run an ALTER against it.
 #
-# The constraint editors locate what they need by reparsing the stored
-# statement, so a statement that does not parse leaves them nothing to work
-# with.  What they do then is what renameColumnFunc() has always done in the
-# same situation: with writable_schema on, the text is handed back unchanged
-# rather than treated as an error.  The ALTER therefore succeeds as a no-op
-# and the corrupt text survives untouched.
+# The constraint editors decide what to do from the in-memory Table but edit
+# the text held in sqlite_schema.  Before touching that text they reparse it
+# and check the result against the live table, so a statement that does not
+# parse - or that parses into something other than the table the command was
+# planned against - is refused and the text is left alone.  Every case here
+# is therefore reported as corruption, with the stored text untouched.
 #
-# The earlier implementations scanned the text instead, which let them both
-# diagnose some of these as corruption and edit others of them in place.
-# Case 4 is the one that shows the difference in the result rather than in
-# the error: its NOT NULL used to be removed from text that has no closing
-# parenthesis.
+# Cases 2, 3 and 4 used to be answered differently: the scanner they replaced
+# looked for a NOT NULL, did not find one in the broken text, and reported
+# success.  In case 4 it went further and removed a NOT NULL from a statement
+# with no closing parenthesis.  Refusing is the safer answer, and the only
+# one available to an editor that works from a parse.
 #
 foreach {tn newsql alter res final} {
   1 "CREATE TABLE t1(a, b"
     "ALTER TABLE t1 ALTER c SET NOT NULL"
-    {0 {}}
+    {1 {database disk image is malformed}}
     "CREATE TABLE t1(a, b"
 
   2 "CREATE TABLE t1(a, b, "
     "ALTER TABLE t1 ALTER c DROP NOT NULL"
-    {0 {}}
+    {1 {database disk image is malformed}}
     "CREATE TABLE t1(a, b, "
 
   3 "CREATE TABLE t1(a, b, CHECK( ..."
     "ALTER TABLE t1 ALTER c DROP NOT NULL"
-    {0 {}}
+    {1 {database disk image is malformed}}
     "CREATE TABLE t1(a, b, CHECK( ..."
 
   4 "CREATE TABLE t1(a, b, c NOT NULL"
     "ALTER TABLE t1 ALTER c DROP NOT NULL"
-    {0 {}}
+    {1 {database disk image is malformed}}
     "CREATE TABLE t1(a, b, c NOT NULL"
 
   5 "CREATE TABLE"
     "ALTER TABLE t1 ALTER c DROP NOT NULL"
-    {0 {}}
+    {1 {database disk image is malformed}}
     "CREATE TABLE"
 
   6 "CREATE TABLE"
     "ALTER TABLE t1 ADD CONSTRAINT nn CHECK (a!=0)"
-    {0 {}}
+    {1 {database disk image is malformed}}
     "CREATE TABLE"
 
 } {
