@@ -4046,6 +4046,28 @@ void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
 }
 
+/*
+** Internal SQL function:
+**
+**     sqlite_set_strict(SQL, BSEP)
+**
+** SQL is a CREATE TABLE statement.  Return a copy of it with the STRICT
+** table-option appended.  BSEP is true if the statement already carries a
+** table-option list (in practice, WITHOUT ROWID) and the new option has to
+** be introduced with a comma rather than with a space.
+**
+** The caller knows whether a separator is needed because it read
+** TF_WithoutRowid off the Table object.  Nothing here has to go looking
+** for it in the text.
+**
+** The only text work is deciding where the statement really ends.  The
+** stored SQL can carry trailing whitespace, and when the CREATE TABLE was
+** followed by a semicolon it can carry a trailing comment as well.
+** Appending after a "--" comment would bury the new option inside it, so
+** alterRtrimConstraint() is used to step back to the end of the last real
+** token.  It keeps block comments, which are terminated and so are safe to
+** append after.
+*/
 static void setStrictFunc(
   sqlite3_context *ctx,
   int NotUsed,
@@ -4075,6 +4097,35 @@ static void setStrictFunc(
   sqlite3_result_text(ctx, zNew, -1, SQLITE_DYNAMIC);
 }
 
+/*
+** Generate bytecode to implement:
+**
+**    ALTER TABLE pSrc SET <table-option> = ON
+**
+** STRICT is the only table-option this understands.  WITHOUT ROWID cannot
+** be turned on after the fact: it changes the on-disk representation of
+** every row, which is beyond what editing the schema text can do.
+**
+** Turning STRICT on has to hold up against three things:
+**
+**   (1) Every column must be declared with one of the standard datatypes.
+**       Checked here, before anything is written, so that the statement
+**       fails with the same message CREATE TABLE would have given.
+**
+**   (2) Every value already stored must match its column's declared type.
+**
+**   (3) Every column of a non-INTEGER PRIMARY KEY acquires an implied NOT
+**       NULL, so no such column may already hold a NULL.
+**
+** (2) and (3) are exactly what PRAGMA quick_check reports once the table
+** is strict, so the schema text is edited first, the schema is reloaded,
+** and quick_check is then run against the new definition.  If it finds
+** anything the statement aborts and the schema edit is rolled back with
+** it.  This is the same shape sqlite3AlterFinishAddColumn() uses.
+**
+** No row data is rewritten.  STRICT constrains what may be written from
+** here on; it does not change how existing rows are stored.
+*/
 void sqlite3AlterSetTableOption(
   Parse *pParse,    /* Parsing context */
   SrcList *pSrc,    /* The table being altered */
@@ -4094,8 +4145,10 @@ void sqlite3AlterSetTableOption(
     return;
   }
 
+  /* Turning STRICT on when it is already on changes nothing. */
   if( pTab->tabFlags & TF_Strict ) return;
 
+  /* (1) Reject custom datatypes up front. */
   assert( IsOrdinaryTable(pTab) );
   for(ii=0; ii<pTab->nCol; ii++){
     Column *pCol = &pTab->aCol[ii];
@@ -4115,6 +4168,7 @@ void sqlite3AlterSetTableOption(
 
   sqlite3MayAbort(pParse);
 
+  /* Edit the SQL for the named table. */
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
       "sql = sqlite_set_strict(sql, %d) "
@@ -4122,6 +4176,8 @@ void sqlite3AlterSetTableOption(
       , zDb, (pTab->tabFlags & TF_WithoutRowid)!=0, pTab->zName
   );
 
+  /* Reload the database schema, so that the checks below run against the
+  ** table as it now is. */
   renameReloadSchema(pParse, iDb, INITFLAG_AlterSetOpt);
 
   /* (2) and (3): search for a row that the new definition rejects. */
