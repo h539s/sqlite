@@ -4501,13 +4501,19 @@ unset_strict_done:
 /*
 ** Map the name of a table-option to the TF_ flag that represents it, or
 ** return 0 if the name is not one this command understands.
+**
+** bWithout says the name was preceded by the WITHOUT keyword, which is how
+** a CREATE TABLE spells that option and therefore how this one does too.
 */
-static u32 alterTableOptionCode(Token *pOpt){
+static u32 alterTableOptionCode(Token *pOpt, int bWithout){
+  if( bWithout ){
+    if( pOpt->n==5 && sqlite3_strnicmp(pOpt->z, "rowid", 5)==0 ){
+      return TF_WithoutRowid;
+    }
+    return 0;
+  }
   if( pOpt->n==6 && sqlite3_strnicmp(pOpt->z, "strict", 6)==0 ){
     return TF_Strict;
-  }
-  if( pOpt->n==13 && sqlite3_strnicmp(pOpt->z, "without_rowid", 13)==0 ){
-    return TF_WithoutRowid;
   }
   return 0;
 }
@@ -5036,7 +5042,7 @@ static void alterCheckExistingRows(
 }
 
 /*
-** Implement "ALTER TABLE pTab SET STRICT = ON|OFF".
+** Implement "ALTER TABLE pTab SET STRICT ON|OFF".
 **
 ** Turning STRICT on has to hold up against three things:
 **
@@ -5266,7 +5272,8 @@ void sqlite3AlterSetTableOption(
   Parse *pParse,    /* Parsing context */
   SrcList *pSrc,    /* The table being altered */
   Token *pOpt,      /* Name of the table-option being set */
-  int bOn           /* True to turn it on, false to turn it off */
+  int bOn,          /* True to turn it on, false to turn it off */
+  int bWithout      /* True if WITHOUT preceded the name */
 ){
   Table *pTab = 0;
   int iDb = 0;
@@ -5286,9 +5293,14 @@ void sqlite3AlterSetTableOption(
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 3);
   if( !pTab ) return;
 
-  optFlag = alterTableOptionCode(pOpt);
+  optFlag = alterTableOptionCode(pOpt, bWithout);
   if( optFlag==0 ){
-    sqlite3ErrorMsg(pParse, "unknown table option: %.*s", pOpt->n, pOpt->z);
+    if( bWithout ){
+      sqlite3ErrorMsg(pParse, "unknown table option: WITHOUT %.*s",
+                      pOpt->n, pOpt->z);
+    }else{
+      sqlite3ErrorMsg(pParse, "unknown table option: %.*s", pOpt->n, pOpt->z);
+    }
     return;
   }
 

@@ -2013,8 +2013,13 @@ cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) LP(A) expr(E) RP(B) onconf. {
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) SET TYPE typetoken(Z). {
   sqlite3AlterSetColumnType(pParse, X, &Y, &Z);
 }
+// The option is spelled as it is in a CREATE TABLE, so WITHOUT ROWID is
+// two words here as it is there, and the rules mirror table_option above.
+cmd ::= ALTER TABLE fullname(X) SET WITHOUT nm(Y) onoff(Z). {
+  sqlite3AlterSetTableOption(pParse, X, &Y, Z, 1);
+}
 cmd ::= ALTER TABLE fullname(X) SET nm(Y) onoff(Z). {
-  sqlite3AlterSetTableOption(pParse, X, &Y, Z);
+  sqlite3AlterSetTableOption(pParse, X, &Y, Z, 0);
 }
 
 // The right-hand side of "ALTER TABLE ... SET <option>".  ON is a
