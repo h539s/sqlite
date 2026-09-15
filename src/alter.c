@@ -4194,10 +4194,20 @@ static u32 alterTableOptionCode(Token *pOpt){
   return 0;
 }
 
+/*
+** The name the replacement table is built under while a rebuild is in
+** progress.  Derived from the table name so that both phases of the
+** rebuild agree on it without having to pass it between them.  Caller
+** frees the result.
+*/
 static char *alterRebuildName(sqlite3 *db, const char *zTab){
   return sqlite3MPrintf(db, "altertab_%s", zTab);
 }
 
+/*
+** Prepare and run one statement of dynamically built SQL.  Rows returned
+** are discarded.  On error, leave a message in *pzErrMsg.
+*/
 static int alterExecSql(sqlite3 *db, char **pzErrMsg, const char *zSql){
   sqlite3_stmt *pStmt = 0;
   int rc;
@@ -4227,6 +4237,12 @@ static int alterExecSqlF(sqlite3 *db, char **pzErrMsg, const char *zFmt, ...){
   return rc;
 }
 
+/*
+** Run one SELECT that is expected to return a single text value, and
+** return a copy of it.  Returns NULL if there is no row.
+**
+** Takes ownership of zSql, which is freed before returning.
+*/
 static char *alterQueryText(sqlite3 *db, int *pRc, char *zSql){
   sqlite3_stmt *pStmt = 0;
   char *zRet = 0;
@@ -4244,6 +4260,16 @@ static char *alterQueryText(sqlite3 *db, int *pRc, char *zSql){
   return zRet;
 }
 
+/*
+** Return a copy of CREATE TABLE statement zSql with its table-option list
+** replaced by the one implied by tabFlags, and its table name replaced by
+** zNewName.  The caller frees the result.
+**
+** Neither edit is a search.  The option list is rebuilt from
+** Parse.zTabOpt, on the same reasoning as sqlite_unset_strict().  The name
+** is located through its RenameToken, which is what sqlite_rename_table()
+** uses, so a quoted or awkwardly spelled name needs no special handling.
+*/
 static char *alterRewriteCreate(
   sqlite3 *db,          /* Database connection */
   int iDb,              /* Schema that zSql belongs to */
@@ -4280,6 +4306,11 @@ static char *alterRewriteCreate(
   return zNew;
 }
 
+/*
+** Implement the OP_AlterTabOpt opcode.  See the comment on that opcode for
+** how the work is split, and alterSetWithoutRowid() for what the two
+** phases are separated by.
+*/
 int sqlite3RunAlterTabOpt(
   char **pzErrMsg,      /* OUT: error message */
   sqlite3 *db,          /* Database connection */
@@ -4309,6 +4340,10 @@ int sqlite3RunAlterTabOpt(
   if( zTmp==0 ) return SQLITE_NOMEM_BKPT;
 
   if( iPhase==2 ){
+    /* The original is gone.  Give the replacement its name and put the
+    ** indexes and triggers back.  SQLITE_LegacyAlter keeps the rename from
+    ** rewriting references in other objects: those already name the table
+    ** correctly, since the name is being restored rather than changed. */
     savedFlags = db->flags;
     savedInitDb = db->init.iDb;
     db->flags |= SQLITE_LegacyAlter;
@@ -4319,7 +4354,13 @@ int sqlite3RunAlterTabOpt(
     if( db->pAlterRedo ){
       char **az = db->pAlterRedo;
 
+      /* az[0] is the statement the table should be stored under.  The
+      ** rename above wrote a correct but requoted version of it; restore
+      ** the intended spelling so that turning the option back off gives
+      ** the text the table started with. */
       if( rc==SQLITE_OK && az[0] ){
+        /* Writing sqlite_schema directly needs writable_schema, which in
+        ** turn is ignored while defensive mode is on. */
         u64 f = db->flags;
         db->flags |= SQLITE_WriteSchema;
         db->flags &= ~(u64)SQLITE_Defensive;
@@ -4342,6 +4383,8 @@ int sqlite3RunAlterTabOpt(
     return rc;
   }
 
+  /* Phase 1.  Discard any hand-off left behind by a run that failed
+  ** between the two phases. */
   if( db->pAlterRedo ){
     char **az = db->pAlterRedo;
     for(i=0; az[i]; i++) sqlite3DbFree(db, az[i]);
@@ -4354,6 +4397,8 @@ int sqlite3RunAlterTabOpt(
     goto alter_tabopt_out;
   }
 
+  /* The columns to carry across.  Generated columns are computed by the
+  ** new table and must not be copied. */
   for(i=0; i<pTab->nCol; i++){
     if( pTab->aCol[i].colFlags & COLFLAG_GENERATED ) continue;
     zCols = sqlite3MPrintf(db, "%z%s\"%w\"", zCols, zCols?",":"",
@@ -4362,12 +4407,18 @@ int sqlite3RunAlterTabOpt(
   }
   if( zCols==0 ){ rc = SQLITE_CORRUPT_BKPT; goto alter_tabopt_out; }
 
+  /* The stored CREATE TABLE text, and the DDL of every index and trigger
+  ** on this table.  The DROP between the two phases takes those objects
+  ** with it, so their text has to be captured now.  Automatic indexes have
+  ** a NULL sql and are skipped: the new table makes its own. */
   zOldSql = alterQueryText(db, &rc, sqlite3MPrintf(db,
       "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
       " WHERE type='table' AND name=%Q COLLATE nocase", zDb, zTab));
   if( rc!=SQLITE_OK ) goto alter_tabopt_out;
   if( zOldSql==0 ){ rc = SQLITE_CORRUPT_BKPT; goto alter_tabopt_out; }
 
+  /* Slot 0 of the hand-off carries the statement the table should end up
+  ** stored under; the rest carry the DDL to replay. */
   azRedo = sqlite3DbMallocZero(db, 2*sizeof(char*));
   if( azRedo==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
   nRedo = 1;
@@ -4403,6 +4454,8 @@ int sqlite3RunAlterTabOpt(
       (bOn ? TF_WithoutRowid : 0) | (pTab->tabFlags & TF_Strict), 0);
   if( azRedo[0]==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
 
+  /* init.iDb steers the CREATE into the right schema, as sqlite3RunVacuum()
+  ** does. */
   savedInitDb = db->init.iDb;
   db->init.iDb = (u8)iDb;
   rc = alterExecSql(db, pzErrMsg, zNewSql);
@@ -4414,6 +4467,7 @@ int sqlite3RunAlterTabOpt(
         zDb, zTmp, zCols, zCols, zDb, zTab);
   }
 
+  /* Hand the saved DDL to phase 2, which runs after the DROP. */
   if( rc==SQLITE_OK ){
     db->pAlterRedo = azRedo;
     azRedo = 0;
@@ -4544,6 +4598,33 @@ static void alterSetStrict(
   alterCheckExistingRows(pParse, pTab, zDb, "STRICT", bOn);
 }
 
+/*
+** Implement "ALTER TABLE pTab SET WITHOUT_ROWID = ON|OFF".
+**
+** A rowid table and a WITHOUT ROWID table are different on disk, so unlike
+** STRICT this cannot be a schema-text edit.  The table has to be built
+** anew, and the work is split into three pieces because only one of them
+** is allowed to destroy a b-tree.
+**
+**   1. OP_AlterTabOpt phase 1 creates the replacement beside the original,
+**      under a derived name, from the stored CREATE TABLE text with the
+**      option list and the name rewritten.  Then it copies the rows in.
+**
+**   2. Ordinary generated DROP TABLE code removes the original.  This has
+**      to be generated here rather than run from inside the opcode:
+**      OP_Destroy refuses while another statement is reading, and the
+**      statement that invokes an opcode is itself one.  Generated into
+**      this statement, the reader count is one and the drop is allowed -
+**      exactly as for a plain DROP TABLE.
+**
+**   3. OP_AlterTabOpt phase 2 renames the replacement into place and
+**      rebuilds the indexes and triggers that went with the original.
+**
+** The DROP fires foreign key actions on any child row pointing at the
+** table, and PRAGMA foreign_keys cannot be turned off inside a
+** transaction, so that case is refused up front instead.  This is the same
+** reason the published twelve-step rebuild starts by disabling them.
+*/
 static void alterSetWithoutRowid(
   Parse *pParse,        /* Parsing context */
   Table *pTab,          /* The table being altered */
@@ -4590,6 +4671,8 @@ static void alterSetWithoutRowid(
     }
   }
 
+  /* Both phases derive the same name for the replacement, so it is not
+  ** passed between them.  It must therefore be free. */
   zTmp = alterRebuildName(db, pTab->zName);
   if( zTmp==0 ) return;
   if( sqlite3FindTable(db, zTmp, zDb)!=0 ){
