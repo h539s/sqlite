@@ -2595,6 +2595,24 @@ void sqlite3ColDefLocExtend(Parse *pParse){
   pLoc->t.n = (unsigned)notNullRtrim(pLoc->t.z, zLimit);
 }
 
+/*
+** Extend the most recently recorded FOREIGN KEY extent to zEnd, so that a
+** column-level DEFERRABLE clause leaves with the key it belongs to.
+**
+** The table form carries its DEFERRABLE clause in the same grammar rule, so
+** the extent already covers it.  The column form does not: "a REFERENCES
+** p(x) DEFERRABLE INITIALLY DEFERRED" is two ccons, and the extent recorded
+** when the key was created stops at the end of the first.
+**
+** Left behind, that clause would not be inert.  SQLite applies a DEFERRABLE
+** clause to whichever key is the most recently created one, so after the
+** key it was written for is gone it would silently defer a different key.
+**
+** It is only this key's clause if it sits immediately after the extent, so
+** that is what is checked.  A DEFERRABLE written on a column that has no
+** REFERENCES of its own is somewhere else entirely, and the extent is left
+** as it was.
+*/
 void sqlite3FkLocExtend(Parse *pParse, const char *zEnd){
   ParseLoc *p;
   const char *z;
@@ -4032,6 +4050,29 @@ static int alterAutoIndexNumber(const char *zName){
   return z[0]==0 ? n : 0;
 }
 
+/*
+** Internal SQL function:
+**
+**     sqlite_drop_fk(ISCHEMA, SQL, PARENT, NCHILD, <child...>, <parent...>)
+**
+** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
+** copy of it with every FOREIGN KEY matching the given shape removed: the
+** child columns are the NCHILD arguments after NCHILD, the parent table is
+** PARENT, and the parent columns are whatever arguments follow the child
+** ones - none of them if the key was written without a parent column list.
+**
+** A FOREIGN KEY need not have a name, so it is identified by what it says
+** rather than by what it is called.  Two keys may say the same thing; all
+** of them go.
+**
+** Pairing a key with its text:
+**
+**   Both lists are built by prepending - Table.u.tab.pFKey in
+**   sqlite3CreateForeignKey() and Parse.pLoc in sqlite3ParseLocAdd() - and
+**   the extent is recorded in the same statement that links the key, so the
+**   two run in the same order and pair off one for one.  If they somehow do
+**   not, the statement is refused rather than guessed at.
+*/
 static void dropFkFunc(
   sqlite3_context *ctx,
   int argc,
@@ -4078,6 +4119,8 @@ static void dropFkFunc(
     goto drop_fk_cleanup;
   }
 
+  /* The two lists must be the same length, or the pairing below is
+  ** meaningless. */
   nKey = 0;
   for(pFKey=pTab->u.tab.pFKey; pFKey; pFKey=pFKey->pNextFrom) nKey++;
   nRec = 0;
@@ -4097,6 +4140,9 @@ static void dropFkFunc(
   }
   memcpy(zOut, zSql, (size_t)nOut+1);
 
+  /* Walk the two lists together.  Both are in reverse order of appearance,
+  ** so this also removes matches right to left, which keeps every extent
+  ** not yet used addressing the same byte of zOut that it did in zSql. */
   pLoc = sParse.pLoc;
   for(pFKey=pTab->u.tab.pFKey; pFKey; pFKey=pFKey->pNextFrom){
     int bMatch;
@@ -4116,6 +4162,7 @@ static void dropFkFunc(
     }
     if( bMatch ){
       if( nParent==0 ){
+        /* The request named no parent columns, so the key must not either. */
         for(i=0; i<nChild; i++){
           if( pFKey->aCol[i].zCol!=0 ) bMatch = 0;
         }
@@ -5043,6 +5090,19 @@ void sqlite3AlterSetTableOption(
   }
 }
 
+/*
+** Implement "ALTER TABLE <table> DROP FOREIGN KEY(<cols>)
+**            REFERENCES <table>(<cols>)".
+**
+** A FOREIGN KEY need not have a name, so it is dropped by what it says.
+** The shape is handed to the editor as it was written and matched against
+** the stored statement there; nothing is resolved against the in-memory
+** schema, which is only asked whether the table can be altered at all.
+**
+** Dropping a foreign key can only relax the table, never break it, so no
+** row is examined and nothing is rebuilt.  The parent's own key and any
+** index behind it belong to the parent table and are left alone.
+*/
 void sqlite3AlterDropForeignKey(
   Parse *pParse,        /* Parsing context */
   SrcList *pSrc,        /* The table being altered */
@@ -5066,6 +5126,9 @@ void sqlite3AlterDropForeignKey(
   zTo = sqlite3NameFromToken(db, pTo);
   if( zTo==0 ) goto drop_fk_exit;
 
+  /* Build the call one name at a time rather than packing the two lists
+  ** into strings: a column name can contain anything a quoted identifier
+  ** can, so there is no separator that would not need escaping. */
   zArg = sqlite3MPrintf(db, "sqlite_drop_fk(%d, sql, %Q, %d",
                         iDb, zTo, pFromCol->nExpr);
   for(i=0; zArg && i<pFromCol->nExpr; i++){
