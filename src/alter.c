@@ -2936,6 +2936,25 @@ static int alterColumnIndex(Table *pTab, const char *zCol){
   return -1;
 }
 
+/*
+** Cut the clause whose extent is pLoc out of the statement held in zOut,
+** which is nOut bytes long and started life as a copy of zSql.  Return the
+** new length.
+**
+** The whitespace and comments on either side of the clause go with it.  If
+** what comes next closes the list or separates it, the neighbours can abut
+** - "a INT NOT NULL, b" becomes "a INT, b" and not "a INT , b" - and a
+** comma sitting in front of the clause belongs to it, so that removing a
+** table-constraint does not leave the list with a hole.  Otherwise exactly
+** one space is left behind to keep the neighbours apart.
+**
+** A comment in front of the clause is deliberately left alone.  It belongs
+** to whatever precedes it, not to the clause being removed.
+**
+** Offsets are taken relative to zSql rather than zOut so that a caller
+** removing several clauses can work right to left: every extent not yet
+** used still addresses the same byte of zOut that it addressed in zSql.
+*/
 static int alterExciseClause(
   char *zOut,             /* Statement being edited, in place */
   int nOut,               /* Current length of zOut */
