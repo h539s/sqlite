@@ -14,10 +14,11 @@
 #   ADD CONSTRAINT n UNIQUE(...)
 #   ADD CONSTRAINT n PRIMARY KEY(...)
 #   ADD CONSTRAINT n FOREIGN KEY(...) REFERENCES ...
-#   ADD CONSTRAINT n (<column>) DEFAULT <value>
+#   COLUMN <column> ADD DEFAULT <value>
 #
-# The name is required in all of them.  Everything but DEFAULT becomes a
-# table-constraint; DEFAULT belongs to one column, so that form names it.
+# The name is required in the ADD CONSTRAINT forms, which all become
+# table-constraints.  A DEFAULT belongs to one column rather than to the
+# table, so it names the column instead and carries no name of its own.
 #
 # What is stored is the text as written, spliced in at a position the
 # parser recorded rather than one found by scanning.  UNIQUE and PRIMARY
@@ -175,13 +176,13 @@ do_execsql_test 3.6 {
 reset_db
 do_execsql_test 4.0 {
   CREATE TABLE t1(a,b,c,d,e);
-  ALTER TABLE t1 ADD CONSTRAINT v1 (a) DEFAULT 5;
-  ALTER TABLE t1 ADD CONSTRAINT v2 (b) DEFAULT -1;
-  ALTER TABLE t1 ADD CONSTRAINT v3 (c) DEFAULT (2+3);
-  ALTER TABLE t1 ADD CONSTRAINT v4 (d) DEFAULT 'q';
-  ALTER TABLE t1 ADD CONSTRAINT v5 (e) DEFAULT TRUE;
+  ALTER TABLE t1 COLUMN a ADD DEFAULT 5;
+  ALTER TABLE t1 COLUMN b ADD DEFAULT -1;
+  ALTER TABLE t1 COLUMN c ADD DEFAULT (2+3);
+  ALTER TABLE t1 COLUMN d ADD DEFAULT 'q';
+  ALTER TABLE t1 COLUMN e ADD DEFAULT TRUE;
   SELECT sql FROM sqlite_schema;
-} {{CREATE TABLE t1(a CONSTRAINT v1 DEFAULT 5,b CONSTRAINT v2 DEFAULT -1,c CONSTRAINT v3 DEFAULT (2+3),d CONSTRAINT v4 DEFAULT 'q',e CONSTRAINT v5 DEFAULT TRUE)}}
+} {{CREATE TABLE t1(a DEFAULT 5,b DEFAULT -1,c DEFAULT (2+3),d DEFAULT 'q',e DEFAULT TRUE)}}
 do_execsql_test 4.1 {
   SELECT name, coalesce(dflt_value,'~') FROM pragma_table_info('t1');
 } {a 5 b -1 c 2+3 d 'q' e TRUE}
@@ -196,21 +197,13 @@ reset_db
 do_execsql_test 4.3 {
   CREATE TABLE t1(a, b);
   INSERT INTO t1 VALUES(1, NULL);
-  ALTER TABLE t1 ADD CONSTRAINT v1 (b) DEFAULT 'z';
+  ALTER TABLE t1 COLUMN b ADD DEFAULT 'z';
   SELECT a, quote(b) FROM t1;
 } {1 NULL}
 do_execsql_test 4.4 {
   INSERT INTO t1(a) VALUES(2);
   SELECT a, quote(b) FROM t1 ORDER BY a;
 } {1 NULL 2 'z'}
-
-# The name is stored as written, quotes and all.
-reset_db
-do_execsql_test 4.5 {
-  CREATE TABLE t1(a INT);
-  ALTER TABLE t1 ADD CONSTRAINT "odd name" (a) DEFAULT 1;
-  SELECT sql FROM sqlite_schema;
-} {{CREATE TABLE t1(a INT CONSTRAINT "odd name" DEFAULT 1)}}
 
 #-------------------------------------------------------------------------
 # A converted table is indistinguishable from one created that way.
@@ -289,23 +282,23 @@ do_catchsql_test 6.6 {
 reset_db
 do_catchsql_test 6.7 {
   CREATE TABLE t1(a AS (1), b);
-  ALTER TABLE t1 ADD CONSTRAINT v1 (a) DEFAULT 5;
+  ALTER TABLE t1 COLUMN a ADD DEFAULT 5;
 } {1 {cannot use DEFAULT on a generated column}}
 
 reset_db
 do_catchsql_test 6.8 {
   CREATE TABLE t1(a DEFAULT 1, b);
-  ALTER TABLE t1 ADD CONSTRAINT v1 (a) DEFAULT 5;
+  ALTER TABLE t1 COLUMN a ADD DEFAULT 5;
 } {1 {column "a" already has a default value}}
 
 reset_db
 do_catchsql_test 6.9 {
   CREATE TABLE t1(a, b);
-  ALTER TABLE t1 ADD CONSTRAINT v1 (a) DEFAULT (b+1);
+  ALTER TABLE t1 COLUMN a ADD DEFAULT (b+1);
 } {1 {default value of column [a] is not constant}}
 
 do_catchsql_test 6.10 {
-  ALTER TABLE t1 ADD CONSTRAINT v1 (zz) DEFAULT 1;
+  ALTER TABLE t1 COLUMN zz ADD DEFAULT 1;
 } {1 {no such column: zz}}
 
 do_catchsql_test 6.11 {
