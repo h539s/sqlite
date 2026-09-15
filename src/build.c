@@ -3087,11 +3087,13 @@ void sqlite3EndTable(
   if( !pSelect && IsOrdinaryTable(p) ){
     assert( pCons && pEnd );
 
-    /* Remember where the table-option list begins - the first byte after
-    ** the ")" that closes the column list.  ALTER TABLE ... SET <option>
-    ** rewrites that list wholesale rather than hunting for one option
+    /* Remember the ")" that closes the column and constraint list.  Two
+    ** ALTER TABLE edits are made relative to it: a new table-constraint goes
+    ** in just before it, and the table-option list - which the grammar puts
+    ** after it - is rewritten wholesale rather than hunting for one option
     ** inside it.  Only useful while reparsing a stored statement, so it is
-    ** not worth a field in the Table object. */
+    ** not worth a field in the Table object.  A CREATE TABLE ... AS SELECT
+    ** has no such token and is excluded above. */
     if( IN_RENAME_OBJECT ){
       pParse->sColListEnd = *pEnd;
     }
@@ -3100,9 +3102,6 @@ void sqlite3EndTable(
       pCons = pEnd;
     }
     p->u.tab.addColOffset = 13 + (int)(pCons->z - pParse->sNameToken.z);
-    /* Where a new table-constraint is spliced in: the ")" that closes the
-    ** column and constraint list.  A CREATE TABLE ... AS SELECT has no such
-    ** token and leaves this 0. */
   }
 #endif
 }
