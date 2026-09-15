@@ -1,0 +1,229 @@
+# 2026 September 12
+#
+# The author disclaims copyright to this source code.  In place of
+# a legal notice, here is a blessing:
+#
+#    May you do good and not evil.
+#    May you find forgiveness for yourself and forgive others.
+#    May you share freely, never taking more than you give.
+#
+#*************************************************************************
+#
+# Tests for ALTER TABLE <table> SET STRICT = ON.
+#
+# The command appends the STRICT table-option to the stored CREATE TABLE
+# statement, reloads the schema, and then uses PRAGMA quick_check to
+# confirm that the rows already in the table satisfy the stricter
+# definition.  No row data is rewritten.
+#
+
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+set testprefix alterstrict
+
+# If SQLITE_OMIT_ALTERTABLE is defined, omit this file.
+ifcapable !altertable {
+  finish_test
+  return
+}
+
+#-------------------------------------------------------------------------
+# Conversions that must succeed, and the schema text they produce.
+#
+foreach {tn create rows tbl nm after} {
+ 1   {CREATE TABLE t1(a INT)}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT) STRICT}
+ 2   {CREATE TABLE t1(a INT, b TEXT, c REAL, d BLOB, e ANY)}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT, b TEXT, c REAL, d BLOB, e ANY) STRICT}
+ 3   {CREATE TABLE t1(a INT NOT NULL, b TEXT DEFAULT 'x')}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT NOT NULL, b TEXT DEFAULT 'x') STRICT}
+ 4   {CREATE TABLE t1(a INTEGER PRIMARY KEY, b TEXT)}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INTEGER PRIMARY KEY, b TEXT) STRICT}
+ 5   {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT PRIMARY KEY, b TEXT) WITHOUT ROWID, STRICT}
+ 6   {CREATE TABLE t1(a TEXT, b INT, PRIMARY KEY(a))}
+     {INSERT INTO t1 VALUES('k',1);}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a TEXT, b INT, PRIMARY KEY(a)) STRICT}
+ 7   {CREATE TABLE t1(a INT, b INT GENERATED ALWAYS AS (a+1) STORED)}
+     {INSERT INTO t1(a) VALUES(5);}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT, b INT GENERATED ALWAYS AS (a+1) STORED) STRICT}
+ 8   {CREATE TABLE t1(a INT, b TEXT, CHECK(a>0))}
+     {INSERT INTO t1 VALUES(1,'q');}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT, b TEXT, CHECK(a>0)) STRICT}
+ 9   {CREATE TABLE t1(a INT UNIQUE, b TEXT COLLATE nocase)}
+     {}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT UNIQUE, b TEXT COLLATE nocase) STRICT}
+ 10  {CREATE TABLE t1(a ANY)}
+     {INSERT INTO t1 VALUES('s'),(1),(x'ff');}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a ANY) STRICT}
+ 11  {CREATE TABLE "a b"(x INT)}
+     {}
+     {"a b"}
+     {a b}
+     {CREATE TABLE "a b"(x INT) STRICT}
+ 12  {CREATE TABLE t1(a INT, b TEXT)}
+     {INSERT INTO t1 VALUES(1,'x'),(2,'y');}
+     {t1}
+     {t1}
+     {CREATE TABLE t1(a INT, b TEXT) STRICT}
+} {
+  reset_db
+
+  do_execsql_test 1.$tn.0 $create
+  if {$rows ne ""} { do_execsql_test 1.$tn.1 $rows }
+
+  do_execsql_test 1.$tn.2 "ALTER TABLE $tbl SET STRICT = ON" {}
+
+  do_execsql_test 1.$tn.3 {
+    SELECT sql FROM sqlite_schema WHERE type='table' AND sql IS NOT NULL
+  } [list $after]
+
+  # The table must now behave as a STRICT table.
+  do_execsql_test 1.$tn.4 {
+    SELECT count(*) FROM pragma_table_list WHERE name=$nm AND strict=1
+  } {1}
+
+  do_execsql_test 1.$tn.5 { PRAGMA integrity_check } {ok}
+}
+
+#-------------------------------------------------------------------------
+# Conversions that must be refused, and the message they give.
+#
+foreach {tn setup stmt err} {
+ 1   {CREATE TABLE t1(a VARCHAR(9), b INT);}
+     {ALTER TABLE t1 SET STRICT = ON}
+     {unknown datatype for t1.a: "VARCHAR(9)"}
+ 2   {CREATE TABLE t1(a, b INT);}
+     {ALTER TABLE t1 SET STRICT = ON}
+     {missing datatype for t1.a}
+ 3   {CREATE TABLE t1(a INT, b TEXT); INSERT INTO t1 VALUES('abc','x');}
+     {ALTER TABLE t1 SET STRICT = ON}
+     {cannot set STRICT on t1: non-INT value in t1.a}
+ 4   {CREATE TABLE t1(a TEXT, b INT, PRIMARY KEY(a)); INSERT INTO t1 VALUES(NULL,1);}
+     {ALTER TABLE t1 SET STRICT = ON}
+     {cannot set STRICT on t1: NULL value in t1.a}
+ 5   {CREATE TABLE t1(a INT);}
+     {ALTER TABLE t1 SET FOO = ON}
+     {unknown table option: FOO}
+ 6   {CREATE TABLE t1(a INT); CREATE VIEW v1 AS SELECT * FROM t1;}
+     {ALTER TABLE v1 SET STRICT = ON}
+     {cannot set table options on view "v1"}
+ 7   {}
+     {ALTER TABLE nosuch SET STRICT = ON}
+     {no such table: nosuch}
+ 8   {CREATE TABLE t1(a INTEGER PRIMARY KEY AUTOINCREMENT);}
+     {ALTER TABLE sqlite_sequence SET STRICT = ON}
+     {table sqlite_sequence may not be altered}
+} {
+  reset_db
+  if {$setup ne ""} { do_execsql_test 2.$tn.0 $setup }
+  do_catchsql_test 2.$tn.1 $stmt [list 1 $err]
+}
+
+#-------------------------------------------------------------------------
+# A refused conversion leaves the schema and the rows exactly as they were.
+#
+reset_db
+do_execsql_test 3.0 {
+  CREATE TABLE t1(a INT, b TEXT);
+  INSERT INTO t1 VALUES('abc', 'x');
+}
+do_catchsql_test 3.1 {
+  ALTER TABLE t1 SET STRICT = ON;
+} {1 {cannot set STRICT on t1: non-INT value in t1.a}}
+do_execsql_test 3.2 {
+  SELECT sql FROM sqlite_schema WHERE name='t1'
+} {{CREATE TABLE t1(a INT, b TEXT)}}
+do_execsql_test 3.3 {
+  SELECT typeof(a), a FROM t1
+} {text abc}
+
+#-------------------------------------------------------------------------
+# Turning STRICT on when it is already on is a no-op, not an error.
+#
+reset_db
+do_execsql_test 4.0 {
+  CREATE TABLE t1(a INT) STRICT;
+  ALTER TABLE t1 SET STRICT = ON;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT) STRICT}}
+
+#-------------------------------------------------------------------------
+# There is no OFF form.  STRICT cannot be turned back off this way.
+#
+do_catchsql_test 5.0 {
+  ALTER TABLE t1 SET STRICT = OFF;
+} {1 {near "OFF": syntax error}}
+
+#-------------------------------------------------------------------------
+# The edit lands on the table row only; dependent objects are untouched.
+#
+reset_db
+do_execsql_test 6.0 {
+  CREATE TABLE t1(a INT, b TEXT);
+  CREATE INDEX i1 ON t1(a);
+  CREATE VIEW v1 AS SELECT a FROM t1;
+  CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END;
+  ALTER TABLE t1 SET STRICT = ON;
+  SELECT name, sql FROM sqlite_schema ORDER BY name;
+} {i1 {CREATE INDEX i1 ON t1(a)} r1 {CREATE TRIGGER r1 AFTER INSERT ON t1 BEGIN SELECT 1; END} t1 {CREATE TABLE t1(a INT, b TEXT) STRICT} v1 {CREATE VIEW v1 AS SELECT a FROM t1}}
+
+#-------------------------------------------------------------------------
+# A trailing line comment in the stored statement must not swallow the new
+# option.
+#
+reset_db
+do_execsql_test 7.0 {
+  CREATE TABLE t1(a INT) -- trailing
+  ;
+}
+do_execsql_test 7.1 {
+  ALTER TABLE t1 SET STRICT = ON;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT) STRICT}}
+
+#-------------------------------------------------------------------------
+# The conversion participates in the surrounding transaction.
+#
+reset_db
+do_execsql_test 8.0 {
+  CREATE TABLE t1(a INT);
+  BEGIN;
+  ALTER TABLE t1 SET STRICT = ON;
+  ROLLBACK;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT)}}
+
+do_execsql_test 8.1 {
+  BEGIN;
+  ALTER TABLE t1 SET STRICT = ON;
+  COMMIT;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a INT) STRICT}}
+
+finish_test
