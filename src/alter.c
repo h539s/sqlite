@@ -2544,7 +2544,9 @@ void sqlite3ConsLocAdd(
   }
 
   /* Extend to the right as far as the parser's lookahead allows, then pull
-  ** back to the last real token. */
+  ** back to the last real token.  The clause can carry more than the two
+  ** keywords it starts with - a sort order, an ON CONFLICT, a column list -
+  ** and Parse.sLastToken is the first token after all of it. */
   zLimit = pParse->sLastToken.z;
   if( zLimit==0 || zLimit<zEnd ) zLimit = zEnd;
   zEnd = &zStart[notNullRtrim(zStart, zLimit)];
