@@ -8364,6 +8364,12 @@ case OP_AlterTabOpt: {
   assert( p->readOnly==0 );
   rc = sqlite3RunAlterTabOpt(&p->zErrMsg, db, pOp->p1, pOp->p4.z,
                              pOp->p2, pOp->p3);
+  /* Creating and dropping objects in the TEMP schema hard-expires every
+  ** prepared statement, this one included (see OP_SetCookie).  The schema
+  ** change is this statement's own doing and the bytecode that follows was
+  ** generated knowing about it, so un-expire ourselves the way
+  ** OP_ParseSchema does.  Without this, the OP_Destroy of the DROP TABLE
+  ** that separates the two phases would fail with SQLITE_ABORT_ROLLBACK. */
   p->expired = 0;
   if( rc ) goto abort_due_to_error;
   break;

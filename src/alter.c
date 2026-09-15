@@ -4260,6 +4260,23 @@ static char *alterQueryText(sqlite3 *db, int *pRc, char *zSql){
   return zRet;
 }
 
+/*
+** Return a copy of the CREATE statement zSql with the name of the object
+** it creates qualified with schema zDb.  The caller frees the result.
+**
+** Nothing else can steer a nested CREATE into a schema other than "main".
+** sqlite3RunVacuum() gets away with setting db->init.iDb because VACUUM
+** also sets DBFLAG_Vacuum, which is what lets sqlite3TwoPartName() accept
+** that state; a rebuild has no such licence, so it names the schema in the
+** statement text instead.
+**
+** The text held in sqlite_schema is always a plain unqualified CREATE:
+** sqlite3EndTable(), sqlite3CreateIndex() and sqlite3BeginTrigger() each
+** normalise away both the TEMP keyword and any schema prefix the user
+** wrote.  So the name is simply the first token after TABLE, INDEX or
+** TRIGGER, skipping an IF NOT EXISTS if a complete one is present.  A
+** partial match is a name that happens to be spelled "if".
+*/
 static char *alterQualifyDdl(sqlite3 *db, const char *zDb, const char *zSql){
   static const u8 aPhrase[] = { TK_IF, TK_NOT, TK_EXISTS };
   const unsigned char *z = (const unsigned char*)zSql;
@@ -4289,6 +4306,13 @@ static char *alterQualifyDdl(sqlite3 *db, const char *zDb, const char *zSql){
 }
 
 /*
+** Run zSql, which is expected to return one column of CREATE statements,
+** and append each one to the NULL-terminated array at *pazRedo, qualified
+** with schema zSchema.  *pnRedo is the number of entries already there and
+** is advanced past the ones added.
+**
+** Takes ownership of zSql, which is freed before returning.
+*/
 static int alterCollectDdl(
   sqlite3 *db,          /* Database connection */
   char ***pazRedo,      /* IN/OUT: the array being built */
@@ -4429,6 +4453,7 @@ int sqlite3RunAlterTabOpt(
             zDb, az[0], zTab);
         db->flags = f;
       }
+      /* Already schema-qualified by alterCollectDdl(). */
       for(i=1; rc==SQLITE_OK && az[i]; i++){
         rc = alterExecSql(db, pzErrMsg, az[i]);
       }
@@ -4486,6 +4511,12 @@ int sqlite3RunAlterTabOpt(
       " AND type IN ('index','trigger')", zDb, zTab));
   if( rc!=SQLITE_OK ) goto alter_tabopt_err;
 
+  /* A TEMP trigger on a table in another schema is recorded in
+  ** temp.sqlite_schema, so the query above does not see it, but the DROP
+  ** does take it down.  Collect those too - unless TEMP has a table of its
+  ** own by this name, in which case they belong to that one and the DROP
+  ** will leave them alone.  An index cannot be in a different schema from
+  ** its table, so only triggers can turn up here. */
   if( iDb!=1 && sqlite3FindTable(db, zTab, db->aDb[1].zDbSName)==0 ){
     rc = alterCollectDdl(db, &azRedo, &nRedo, db->aDb[1].zDbSName,
       sqlite3MPrintf(db,
