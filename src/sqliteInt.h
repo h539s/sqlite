@@ -5628,14 +5628,6 @@ void sqlite3AlterDropForeignKey(Parse*,SrcList*,ExprList*,Token*,
                                 ExprList*);
 void sqlite3AlterDropCheck(Parse*, SrcList*);
 void sqlite3AlterSetColumnType(Parse*, SrcList*, Token*, Token*);
-void sqlite3AlterAddNamedConstraint(Parse*,SrcList*,Token*,Token*,int,
-                                    ExprList*,const char*,int);
-void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Token*,Token*,Expr*,
-                            const char*,const char*);
-/* Allowed values for the eType parameter of sqlite3AlterAddNamedConstraint() */
-#define ALTERCONS_Unique      1
-#define ALTERCONS_PrimaryKey  2
-#define ALTERCONS_ForeignKey  3
 void sqlite3ConsLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ColDefLocExtend(Parse*);
