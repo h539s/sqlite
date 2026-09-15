@@ -2746,6 +2746,8 @@ static int skipCreateTable(sqlite3_context *ctx, const u8 *zSql, int *piOff){
 ** with a constraint removed.  Two forms, depending on the datatype
 ** of argv[2]:
 **
+**   sqlite_drop_constraint(SQL, INT)  -- Omit NOT NULL from the INT-th column
+**   sqlite_drop_constraint(SQL, TEXT) -- OMIT constraint with name TEXT
 **
 ** In the first case, the left-most column is 0.
 */
@@ -2875,6 +2877,18 @@ static void dropConstraintFunc(
   }
 }
 
+/*
+** Find the column named zCol in pTab, which is a table as just reparsed out
+** of the text held in sqlite_schema.  Returns the column index, or -1.
+**
+** The editors are handed column names rather than column indexes on purpose.
+** An index would have to be resolved from the in-memory Table at prepare
+** time, and the in-memory Table is a cache of the stored text kept in step
+** by the schema cookie - a cookie that an edit to sqlite_schema under
+** writable_schema does not touch.  Resolving the name here, against the text
+** about to be edited, means a stale cache cannot send the edit to the wrong
+** column.
+*/
 static int alterColumnIndex(Table *pTab, const char *zCol){
   int i;
   if( pTab==0 || zCol==0 ) return -1;
@@ -2887,11 +2901,12 @@ static int alterColumnIndex(Table *pTab, const char *zCol){
 /*
 ** Internal SQL function:
 **
-**     sqlite_drop_notnull(ISCHEMA, SQL, ICOL)
+**     sqlite_drop_notnull(ISCHEMA, SQL, COLNAME)
 **
 ** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
-** copy of that statement with every NOT NULL constraint on the ICOL-th
-** column (the left-most column is 0) removed.  If the column has no NOT
+** copy of that statement with every NOT NULL constraint on the column
+** named COLNAME removed.  The name is resolved against SQL itself - see
+** alterColumnIndex().  If the column has no NOT
 ** NULL constraint the statement is returned unchanged, which follows
 ** postgres and matches what the INTEGER form of sqlite_drop_constraint()
 ** does.
@@ -2946,6 +2961,9 @@ static void dropNotNullFunc(
   }
   iCol = alterColumnIndex(pTab, zCol);
   if( iCol<0 ){
+    /* The stored definition has no such column.  That definition is what the
+    ** table will be once the schema is next loaded, so this is a real "no
+    ** such column", not a corrupt statement. */
     errorMPrintf(ctx, "no such column: %s", zCol);
     rc = SQLITE_OK;
     goto drop_notnull_cleanup;
@@ -3020,16 +3038,17 @@ drop_notnull_done:
 /*
 ** Internal SQL function:
 **
-**     sqlite_insert_constraint(ISCHEMA, SQL, CONSTRAINT-TEXT, ICOL)
+**     sqlite_insert_constraint(ISCHEMA, SQL, CONSTRAINT-TEXT, COLNAME)
 **
 ** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
 ** copy of it with CONSTRAINT-TEXT spliced in.
 **
-** ICOL<0 adds a table-constraint: the text goes in just before the ")"
-** that closes the column and constraint list, introduced by a comma, so it
-** becomes the last constraint of the table.  Otherwise the text goes into
-** the definition of the ICOL-th column (the left-most column is 0), where
-** it becomes a constraint on that column.
+** A NULL COLNAME adds a table-constraint: the text goes in just before the
+** ")" that closes the column and constraint list, introduced by a comma, so
+** it becomes the last constraint of the table.  Otherwise the text goes into
+** the definition of the named column, where it becomes a constraint on that
+** column.  The name is resolved against SQL itself - see
+** alterColumnIndex().
 **
 ** Neither position is found by searching.  The statement is reparsed and
 ** both come from what the parser recorded during that parse: Parse.zConsIns
@@ -3077,6 +3096,8 @@ static void insertConstraintFunc(
     rc = SQLITE_CORRUPT_BKPT;
     goto insert_cons_cleanup;
   }
+  /* A NULL column name asks for a table-constraint.  Otherwise the name is
+  ** resolved against the stored text, not against the in-memory Table. */
   if( zCol==0 ){
     iCol = -1;
   }else{
@@ -3238,6 +3259,9 @@ void sqlite3AlterDropConstraint(
   }else{
     int iCol;
     char *zCol;
+    /* alterFindCol() is still what authorizes the change and reports an
+    ** unknown column, but the index it returns is not used: the editor is
+    ** given the name and resolves it against the text it is about to edit. */
     if( alterFindCol(pParse, pTab, pCol, &iCol) ) return;
     zCol = sqlite3NameFromToken(db, pCol);
     if( zCol==0 ) return;
@@ -3337,7 +3361,9 @@ void sqlite3AlterSetNotNull(
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0);
   if( !pTab ) return;
 
-  /* Find the column being altered. */
+  /* Find the column being altered.  alterFindCol() authorizes the change and
+  ** reports an unknown column; the index it returns is not used, because the
+  ** editors resolve the name against the text they are about to edit. */
   if( alterFindCol(pParse, pTab, pCol, &iCol) ){
     return;
   }
@@ -3498,8 +3524,9 @@ void sqlite3AlterAddConstraint(
 **
 ** Reject a name another constraint on this table already carries, splice
 ** zCons into the stored CREATE TABLE statement, and reload the schema.
-** iCol<0 stores it as a table-constraint; otherwise it becomes a
-** constraint on that column.
+** A zCol of 0 stores it as a table-constraint; otherwise it becomes a
+** constraint on that column, named rather than numbered so that the editor
+** resolves it against the stored text.
 **
 ** The text stored is the text the user wrote.  Nothing is regenerated from
 ** the parse tree, so a constraint reads back the way it was typed.
