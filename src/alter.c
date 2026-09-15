@@ -4711,6 +4711,20 @@ static char *alterRewriteCreate(
   return zNew;
 }
 
+/*
+** Return a copy of CREATE TABLE statement zSql with the declared type of
+** column zCol replaced by zType.  The caller frees it.  Returns 0 on
+** failure, having set *pzErr when the reason is worth reporting.
+**
+** This is only the edit.  Whether the edit is a safe thing to do on its
+** own is setColTypeFunc()'s question; when it is not, the caller is
+** rebuilding the table and the answer does not arise.
+**
+** The column is resolved against zSql, and the extent of the type it
+** currently declares comes from what the parser recorded during the
+** reparse, so a column written without a type needs no special case: its
+** extent is empty and sits where a type would go.
+*/
 static char *alterRetypeText(
   sqlite3 *db,          /* Database connection */
   int iDb,              /* Schema that zSql belongs to */
@@ -4743,6 +4757,7 @@ static char *alterRetypeText(
   iStart = (int)(p->t.z - zSql);
   iEnd = iStart + (int)p->t.n;
   assert( iStart>=0 && iEnd<=sqlite3Strlen30(zSql) );
+  /* A column that had no type needs a space in front of the new one. */
   zNew = sqlite3MPrintf(db, "%.*s%s%s%s", iStart, zSql,
                         p->t.n==0 ? " " : "", zType, &zSql[iEnd]);
 
@@ -4751,6 +4766,16 @@ retype_out:
   return zNew;
 }
 
+/*
+** What a table is to be rebuilt as.  A rebuild is the same work whatever
+** provoked it - build the replacement beside the original, copy the rows,
+** drop the original, put the name and the dependent objects back - and the
+** only thing that varies is how the replacement's CREATE TABLE is derived
+** from the original's.  This says that, and nothing else.
+**
+** Handed to OP_AlterTabOpt as P4 in a single allocation, the strings living
+** in the tail, so that P4_DYNAMIC frees the whole thing.
+*/
 struct AlterRebuild {
   const char *zTab;     /* The table being rebuilt */
   const char *zCol;     /* SET TYPE: the column to retype, else 0 */
@@ -4758,6 +4783,9 @@ struct AlterRebuild {
   u8 eWrOp;             /* WITHOUT ROWID: 0 leave alone, 1 add, 2 remove */
 };
 
+/*
+** Build one.  Returns 0 on OOM.
+*/
 static AlterRebuild *alterRebuildNew(
   sqlite3 *db,
   const char *zTab,
@@ -4915,6 +4943,9 @@ int sqlite3RunAlterTabOpt(
     if( rc!=SQLITE_OK ) goto alter_tabopt_err;
   }
 
+  /* Derive the replacement's definition.  The table options are rebuilt
+  ** from flags either way: the one being changed, if one is, and otherwise
+  ** the ones the table already carries. */
   {
     u32 flags;
     char *zBase = zOldSql;
@@ -5086,31 +5117,25 @@ static void alterSetStrict(
 }
 
 /*
-** Implement "ALTER TABLE pTab SET WITHOUT_ROWID = ON|OFF".
+** Generate the three steps of a table rebuild.
 **
-** A rowid table and a WITHOUT ROWID table are different on disk, so unlike
-** STRICT this cannot be a schema-text edit.  The table has to be built
-** anew, and the work is split into three pieces because only one of them
-** is allowed to destroy a b-tree.
+** The work is the same whatever provoked it, so it lives here rather than
+** in each caller: build the replacement beside the original and copy the
+** rows in, drop the original, then give the replacement the original's
+** name and put its indexes and triggers back.  What the replacement is to
+** be is described by the zCol/zType/eWrOp arguments, which are handed
+** through to the opcode and interpreted there against the stored text.
 **
-**   1. OP_AlterTabOpt phase 1 creates the replacement beside the original,
-**      under a derived name, from the stored CREATE TABLE text with the
-**      option list and the name rewritten.  Then it copies the rows in.
-**
-**   2. Ordinary generated DROP TABLE code removes the original.  This has
-**      to be generated here rather than run from inside the opcode:
-**      OP_Destroy refuses while another statement is reading, and the
-**      statement that invokes an opcode is itself one.  Generated into
-**      this statement, the reader count is one and the drop is allowed -
-**      exactly as for a plain DROP TABLE.
-**
-**   3. OP_AlterTabOpt phase 2 renames the replacement into place and
-**      rebuilds the indexes and triggers that went with the original.
+** Only the middle step may destroy a b-tree, and it has to be generated
+** here rather than run from inside the opcode: OP_Destroy refuses while
+** another statement is reading, and the statement that invokes an opcode
+** is itself one.  Generated into this statement, the reader count is one
+** and the drop is allowed, exactly as for a plain DROP TABLE.
 **
 ** The DROP fires foreign key actions on any child row pointing at the
 ** table, and PRAGMA foreign_keys cannot be turned off inside a
-** transaction, so that case is refused up front instead.  This is the same
-** reason the published twelve-step rebuild starts by disabling them.
+** transaction, so that case is refused up front.  This is the same reason
+** the published twelve-step rebuild starts by disabling them.
 */
 static void alterCodeRebuild(
   Parse *pParse,        /* Parsing context */
@@ -5178,6 +5203,31 @@ static void alterCodeRebuild(
 }
 
 /*
+** Implement "ALTER TABLE pTab SET WITHOUT_ROWID = ON|OFF".
+**
+** A rowid table and a WITHOUT ROWID table are different on disk, so unlike
+** STRICT this cannot be a schema-text edit.  The table has to be built
+** anew, and the work is split into three pieces because only one of them
+** is allowed to destroy a b-tree.
+**
+**   1. OP_AlterTabOpt phase 1 creates the replacement beside the original,
+**      under a derived name, from the stored CREATE TABLE text with the
+**      option list and the name rewritten.  Then it copies the rows in.
+**
+**   2. Ordinary generated DROP TABLE code removes the original.  This has
+**      to be generated here rather than run from inside the opcode:
+**      OP_Destroy refuses while another statement is reading, and the
+**      statement that invokes an opcode is itself one.  Generated into
+**      this statement, the reader count is one and the drop is allowed -
+**      exactly as for a plain DROP TABLE.
+**
+**   3. OP_AlterTabOpt phase 2 renames the replacement into place and
+**      rebuilds the indexes and triggers that went with the original.
+**
+** The DROP fires foreign key actions on any child row pointing at the
+** table, and PRAGMA foreign_keys cannot be turned off inside a
+** transaction, so that case is refused up front instead.  This is the same
+** reason the published twelve-step rebuild starts by disabling them.
 */
 static void alterSetWithoutRowid(
   Parse *pParse,        /* Parsing context */
