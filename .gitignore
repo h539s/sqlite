@@ -1,0 +1,79 @@
+# Build products.  Everything here is produced by "./configure" and "make"
+# in the source directory; nothing in this list is a source file.
+#
+# The patterns are anchored with a leading "/" on purpose.  Several of these
+# names also exist as real, tracked sources further down the tree - parse.y
+# is src/parse.y, lempar.c is tool/lempar.c, and there are *.db fixtures in
+# test/ - so an unanchored pattern would hide them too.
+
+# configure output
+/Makefile
+/config.log
+/sqlite_cfg.h
+/sqlite3.pc
+/.tclenv.sh
+/.main.mk.checks
+/.target_source
+/has_tclsh85
+
+# amalgamation and the headers built with it
+/sqlite3.c
+/sqlite3.h
+/sqlite3ext.h
+/sqlite3session.h
+/shell.c
+/ctime.c
+/tclsqlite-ex.c
+/tsrc/
+
+# generated parser and tables
+/parse.c
+/parse.h
+/parse.out
+/parse.sql
+/parse.y
+/opcodes.c
+/opcodes.h
+/keywordhash.h
+/pragma.h
+
+# generated fts5 sources
+/fts5.c
+/fts5.h
+/fts5parse.c
+/fts5parse.h
+/fts5parse.out
+/fts5parse.sql
+/fts5parse.y
+
+# build-time tools
+/lemon
+/lempar.c
+/mkkeywordhash
+/mksourceid
+/src-verify
+/jimsh
+
+# programs
+/sqlite3
+/sqlite3.exe
+/testfixture
+/testfixture.exe
+/sqlite3_analyzer
+/sqldiff
+/sqlite3_rsync
+/dbhash
+/showdb
+
+# test scratch
+/testdir/
+/test.db
+/test.db-*
+/test.db2
+/test.db3
+
+# object files
+*.o
+*.lo
+*.la
+/.libs/
