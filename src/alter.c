@@ -5208,7 +5208,7 @@ static void alterCodeRebuild(
 }
 
 /*
-** Implement "ALTER TABLE pTab SET WITHOUT_ROWID = ON|OFF".
+** Implement "ALTER TABLE pTab SET WITHOUT ROWID ON|OFF".
 **
 ** A rowid table and a WITHOUT ROWID table are different on disk, so unlike
 ** STRICT this cannot be a schema-text edit.  The table has to be built
