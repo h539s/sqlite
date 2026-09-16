@@ -237,7 +237,7 @@ do_execsql_test 4.11.2 {
 
 # A rebuild drops and recreates the table, which fires foreign key
 # actions, so it is refused while they are on - the same restriction SET
-# WITHOUT_ROWID carries, and the reason the published twelve-step rebuild
+# WITHOUT ROWID carries, and the reason the published twelve-step rebuild
 # starts by disabling them.
 #
 reset_db
