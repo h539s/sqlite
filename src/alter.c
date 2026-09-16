@@ -3159,13 +3159,14 @@ static void alterEditFinish(AlterEdit *p, sqlite3_context *ctx){
 /*
 ** Shared implementation of the internal SQL functions
 **
-**     sqlite_drop_notnull(ISCHEMA, SQL, COLNAME)
-**     sqlite_drop_default(ISCHEMA, SQL, COLNAME)
+**     sqlite_drop_notnull(ISCHEMA, SQL, ICOL)
+**     sqlite_drop_default(ISCHEMA, SQL, ICOL)
 **
 ** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
-** copy of that statement with every constraint of kind eType on the column
-** named COLNAME removed.  The name is resolved against SQL itself - see
-** alterColumnIndex().  If the column carries no such constraint the
+** copy of that statement with every constraint of kind eType on column
+** ICOL removed.  ICOL is the index the command resolved at prepare time,
+** against the live table; -1 asks for the constraints written at table
+** level.  If the column carries no such constraint the
 ** statement is returned unchanged, which follows postgres and matches what
 ** the INTEGER form of sqlite_drop_constraint() does.
 **
@@ -3182,35 +3183,23 @@ static void dropColConsFunc(
   sqlite3_context *ctx,
   sqlite3_value **argv,
   u8 eType,                       /* Kind of clause to remove */
-  int bTabCons                    /* True if a NULL COLNAME is allowed, and
+  int bTabCons                    /* True if an ICOL of -1 is allowed, and
                                   ** means the table-level constraints */
 ){
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   int iSchema = sqlite3_value_int(argv[0]);
   const char *zSql = (const char*)sqlite3_value_text(argv[1]);
-  const char *zCol = (const char*)sqlite3_value_text(argv[2]);
+  int iCol = sqlite3_value_int(argv[2]);
   AlterEdit x;
-  int iCol;
 
-  if( zCol==0 && !bTabCons ){
-    /* This form needs a column and was given none. */
-    return;
-  }
+  /* ICOL is -1 for the clauses written at table level, which are the ones
+  ** recorded against no column.  Only the form that accepts that asks for
+  ** it; the others were given a column by the caller. */
+  if( iCol<0 && !bTabCons ) return;
   if( !alterEditBegin(&x, db, iSchema, zSql) ) goto drop_col_cons_done;
-
-  if( zCol==0 ){
-    /* No column named: the clauses written at table level, which are the
-    ** ones recorded against no column. */
-    iCol = -1;
-  }else{
-    iCol = alterColumnIndex(x.pTab, zCol);
-    if( iCol<0 ){
-      /* The stored definition has no such column.  That definition is what
-      ** the table will be once the schema is next loaded, so this is a real
-      ** "no such column", not a corrupt statement. */
-      errorMPrintf(ctx, "no such column: %s", zCol);
-      goto drop_col_cons_done;
-    }
+  if( iCol>=x.pTab->nCol ){
+    x.rc = SQLITE_CORRUPT_BKPT;
+    goto drop_col_cons_done;
   }
 
   if( !alterEditCopy(&x) ) goto drop_col_cons_done;
@@ -3243,7 +3232,7 @@ drop_col_cons_done:
 }
 
 /*
-** Internal SQL function sqlite_drop_notnull(ISCHEMA, SQL, COLNAME).
+** Internal SQL function sqlite_drop_notnull(ISCHEMA, SQL, ICOL).
 */
 static void dropNotNullFunc(
   sqlite3_context *ctx,
@@ -3255,7 +3244,7 @@ static void dropNotNullFunc(
 }
 
 /*
-** Internal SQL function sqlite_drop_default(ISCHEMA, SQL, COLNAME).
+** Internal SQL function sqlite_drop_default(ISCHEMA, SQL, ICOL).
 */
 static void dropDefaultFunc(
   sqlite3_context *ctx,
@@ -3267,11 +3256,11 @@ static void dropDefaultFunc(
 }
 
 /*
-** Internal SQL function sqlite_drop_check(ISCHEMA, SQL, COLNAME).
+** Internal SQL function sqlite_drop_check(ISCHEMA, SQL, ICOL).
 **
 ** The two forms partition the table's CHECK constraints by where each one
-** was written.  A NULL COLNAME removes those written at table level, after
-** the column list; otherwise those written inside the named column's
+** was written.  An ICOL of -1 removes those written at table level, after
+** the column list; otherwise those written inside that column's
 ** definition go.  Neither reaches the other's, whatever the constraints
 ** happen to mention.
 */
@@ -3287,17 +3276,16 @@ static void dropCheckFunc(
 /*
 ** Internal SQL function:
 **
-**     sqlite_insert_constraint(ISCHEMA, SQL, CONSTRAINT-TEXT, COLNAME)
+**     sqlite_insert_constraint(ISCHEMA, SQL, CONSTRAINT-TEXT, ICOL)
 **
 ** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
 ** copy of it with CONSTRAINT-TEXT spliced in.
 **
-** A NULL COLNAME adds a table-constraint: the text goes in just before the
+** An ICOL of -1 adds a table-constraint: the text goes in just before the
 ** ")" that closes the column and constraint list, introduced by a comma, so
 ** it becomes the last constraint of the table.  Otherwise the text goes into
-** the definition of the named column, where it becomes a constraint on that
-** column.  The name is resolved against SQL itself - see
-** alterColumnIndex().
+** the definition of column ICOL, where it becomes a constraint on that
+** column.
 **
 ** Neither position is found by searching.  The statement is reparsed and
 ** both come from what the parser recorded during that parse:
@@ -3314,25 +3302,17 @@ static void insertConstraintFunc(
   int iSchema = sqlite3_value_int(argv[0]);
   const char *zSql = (const char*)sqlite3_value_text(argv[1]);
   const char *zCons = (const char*)sqlite3_value_text(argv[2]);
-  const char *zCol = (const char*)sqlite3_value_text(argv[3]);
+  int iCol = sqlite3_value_int(argv[3]);
   AlterEdit x;
   int iOff;
-  int iCol;
 
   UNUSED_PARAMETER(NotUsed);
   if( zCons==0 ) return;
   if( !alterEditBegin(&x, db, iSchema, zSql) ) goto insert_cons_done;
-
-  /* A NULL column name asks for a table-constraint.  Otherwise the name is
-  ** resolved against the stored text, not against the in-memory Table. */
-  if( zCol==0 ){
-    iCol = -1;
-  }else{
-    iCol = alterColumnIndex(x.pTab, zCol);
-    if( iCol<0 ){
-      errorMPrintf(ctx, "no such column: %s", zCol);
-      goto insert_cons_done;
-    }
+  /* ICOL of -1 asks for a table-constraint. */
+  if( iCol>=x.pTab->nCol ){
+    x.rc = SQLITE_CORRUPT_BKPT;
+    goto insert_cons_done;
   }
 
   if( iCol<0 ){
@@ -3456,7 +3436,7 @@ static Table *alterFindTable(
 ** Form (1) drops a constraint the user named, whatever kind it is, so the
 ** editor is fixed.  Form (2) drops constraints of one kind off a named
 ** column, and zFunc is the editor that knows which kind: every one of them
-** takes (ISCHEMA, SQL, COLNAME) and returns the edited statement.
+** takes (ISCHEMA, SQL, ICOL) and returns the edited statement.
 */
 void sqlite3AlterDropConstraint(
   Parse *pParse,     /* Parsing context */
@@ -3483,15 +3463,10 @@ void sqlite3AlterDropConstraint(
     sqlite3DbFree(db, z);
   }else{
     int iCol;
-    char *zCol;
-    /* alterFindCol() is still what authorizes the change and reports an
-    ** unknown column, but the index it returns is not used: the editor is
-    ** given the name and resolves it against the text it is about to edit. */
+    /* alterFindCol() authorizes the change, reports an unknown column, and
+    ** gives the editor the index to work with. */
     if( alterFindCol(pParse, pTab, pCol, &iCol) ) return;
-    zCol = sqlite3NameFromToken(db, pCol);
-    if( zCol==0 ) return;
-    zArg = sqlite3MPrintf(db, "%s(%d, sql, %Q)", zFunc, iDb, zCol);
-    sqlite3DbFree(db, zCol);
+    zArg = sqlite3MPrintf(db, "%s(%d, sql, %d)", zFunc, iDb, iCol);
   }
 
   /* Edit the SQL for the named table. */
@@ -3578,7 +3553,6 @@ void sqlite3AlterSetNotNull(
   int iDb = 0;
   const char *zDb = 0;
   const char *pCons = 0;
-  char *zCol = 0;
   int nCons = 0;
 
   /* Look up the table being altered. */
@@ -3586,14 +3560,11 @@ void sqlite3AlterSetNotNull(
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0, 2);
   if( !pTab ) return;
 
-  /* Find the column being altered.  alterFindCol() authorizes the change and
-  ** reports an unknown column; the index it returns is not used, because the
-  ** editors resolve the name against the text they are about to edit. */
+  /* Find the column being altered.  alterFindCol() authorizes the change,
+  ** reports an unknown column, and gives the editors the index to use. */
   if( alterFindCol(pParse, pTab, pCol, &iCol) ){
     return;
   }
-  zCol = sqlite3NameFromToken(pParse->db, pCol);
-  if( zCol==0 ) return;
 
   /* Find the length in bytes of the constraint definition */
   pCons = pFirst->z;
@@ -3610,11 +3581,10 @@ void sqlite3AlterSetNotNull(
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
       "sql = sqlite_insert_constraint(%d, "
-              "sqlite_drop_notnull(%d, sql, %Q), %.*Q, %Q) "
+              "sqlite_drop_notnull(%d, sql, %d), %.*Q, %d) "
       "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iDb, iDb, zCol, nCons, pCons, zCol, pTab->zName
+      , zDb, iDb, iDb, iCol, nCons, pCons, iCol, pTab->zName
   );
-  sqlite3DbFree(pParse->db, zCol);
 
   /* Finally, reload the database schema. */
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
@@ -3735,7 +3705,7 @@ void sqlite3AlterAddConstraint(
 
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_insert_constraint(%d, sql, %.*Q, NULL) "
+      "sql = sqlite_insert_constraint(%d, sql, %.*Q, -1) "
       "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
       , zDb, iDb, nCons, pCons, pTab->zName
   );
@@ -3764,7 +3734,7 @@ static void alterAddConstraintText(
   const char *zName,    /* Name of the new constraint, or 0 if unnamed */
   const char *zCons,    /* Text of the constraint to store */
   int nCons,            /* Bytes of zCons to use */
-  const char *zCol      /* Column to attach it to, or 0 for the table */
+  int iCol              /* Column to attach it to, or -1 for the table */
 ){
   /* An unnamed constraint has no name to collide with, so there is nothing
   ** to look for.  That is the DEFAULT case: it is reached by kind rather
@@ -3781,9 +3751,9 @@ static void alterAddConstraintText(
 
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_insert_constraint(%d, sql, %.*Q, %Q) "
+      "sql = sqlite_insert_constraint(%d, sql, %.*Q, %d) "
       "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iDb, nCons, zCons, zCol, pTab->zName
+      , zDb, iDb, nCons, zCons, iCol, pTab->zName
   );
 
   renameReloadSchema(pParse, iDb, INITFLAG_AlterAddCons);
@@ -3912,7 +3882,7 @@ void sqlite3AlterAddNamedConstraint(
   nCons = alterRtrimConstraint(db, zCons, pParse->sLastToken.z - zCons);
 
   if( eType==ALTERCONS_ForeignKey ){
-    alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, 0);
+    alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, -1);
 
     /* Emitted after the reload above, so that foreign_key_check sees the
     ** key that was just added. */
@@ -3957,7 +3927,7 @@ void sqlite3AlterAddNamedConstraint(
     );
     sqlite3DbFree(db, zIdx);
 
-    alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, 0);
+    alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, -1);
   }
 
 add_named_cons_exit:
@@ -4033,7 +4003,7 @@ void sqlite3AlterAddDefault(
   if( zCons==0 ) goto add_default_exit;
 
   alterAddConstraintText(pParse, pTab, iDb, zDb, 0, zCons,
-                         sqlite3Strlen30(zCons), pTabCol->zCnName);
+                         sqlite3Strlen30(zCons), iCol);
 
 add_default_exit:
   sqlite3ExprDelete(db, pExpr);
@@ -5347,7 +5317,7 @@ void sqlite3AlterDropCheck(Parse *pParse, SrcList *pSrc){
 
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_drop_check(%d, sql, NULL) "
+      "sql = sqlite_drop_check(%d, sql, -1) "
       "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
       , zDb, iDb, pTab->zName
   );
@@ -5358,12 +5328,12 @@ void sqlite3AlterDropCheck(Parse *pParse, SrcList *pSrc){
 /*
 ** Internal SQL function:
 **
-**     sqlite_set_coltype(ISCHEMA, SQL, COLNAME, TYPENAME)
+**     sqlite_set_coltype(ISCHEMA, SQL, ICOL, TYPENAME)
 **
 ** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
-** copy of it with the declared type of column COLNAME replaced by
-** TYPENAME.  The column is resolved against SQL itself, and the extent of
-** the type it currently declares comes from what the parser recorded
+** copy of it with the declared type of column ICOL replaced by
+** TYPENAME.  The extent of the type it currently declares comes from
+** what the parser recorded
 ** during the reparse, so a column written without a type is handled by the
 ** same code: its extent is empty and sits where a type would go.
 **
@@ -5405,23 +5375,21 @@ static void setColTypeFunc(
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   int iSchema = sqlite3_value_int(argv[0]);
   const char *zSql = (const char*)sqlite3_value_text(argv[1]);
-  const char *zCol = (const char*)sqlite3_value_text(argv[2]);
+  int iCol = sqlite3_value_int(argv[2]);
   const char *zType = (const char*)sqlite3_value_text(argv[3]);
   Table *pTab;
   ParseLoc *p;
   AlterEdit x;
   char aOld, aNew;
-  int iCol;
   int bInPk = 0;
 
   UNUSED_PARAMETER(NotUsed);
-  if( zCol==0 || zType==0 ) return;
+  if( zType==0 || iCol<0 ) return;
   if( !alterEditBegin(&x, db, iSchema, zSql) ) goto set_coltype_done;
   pTab = x.pTab;
 
-  iCol = alterColumnIndex(pTab, zCol);
-  if( iCol<0 ){
-    errorMPrintf(ctx, "no such column: %s", zCol);
+  if( iCol>=pTab->nCol ){
+    x.rc = SQLITE_CORRUPT_BKPT;
     goto set_coltype_done;
   }
   for(p=x.sParse.pLoc; p; p=p->pNext){
@@ -5437,7 +5405,8 @@ static void setColTypeFunc(
   if( aOld!=aNew ){
     errorMPrintf(ctx, "cannot change the type of column \"%s\" to \"%s\": "
                  "that changes its affinity, and the rows and index entries "
-                 "already stored were written under the old one", zCol, zType);
+                 "already stored were written under the old one",
+                 pTab->aCol[iCol].zCnName, zType);
     goto set_coltype_done;
   }
 
@@ -5467,14 +5436,15 @@ static void setColTypeFunc(
       errorMPrintf(ctx, "cannot change the type of PRIMARY KEY column "
                    "\"%s\" to \"%s\": only a column declared exactly INTEGER "
                    "holds the rowid, so this moves where its values live",
-                   zCol, zType);
+                   pTab->aCol[iCol].zCnName, zType);
       goto set_coltype_done;
     }
   }
 
   /* Handed to the edit so that it is freed on the way out with everything
   ** else this function borrowed. */
-  x.zOut = alterRetypeText(db, iSchema, zSql, zCol, zType, 0);
+  x.zOut = alterRetypeText(db, iSchema, zSql, pTab->aCol[iCol].zCnName,
+                           zType, 0);
   if( x.zOut==0 ){
     x.rc = SQLITE_NOMEM_BKPT;
     goto set_coltype_done;
@@ -5566,9 +5536,9 @@ void sqlite3AlterSetColumnType(
   }else{
     sqlite3NestedParse(pParse,
         "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-        "sql = sqlite_set_coltype(%d, sql, %Q, %Q) "
+        "sql = sqlite_set_coltype(%d, sql, %d, %Q) "
         "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-        , zDb, iDb, zCol, zType, pTab->zName
+        , zDb, iDb, iCol, zType, pTab->zName
     );
     renameReloadSchema(pParse, iDb, INITFLAG_AlterSetType);
   }
