@@ -3586,8 +3586,10 @@ void sqlite3AlterSetNotNull(
       , zDb, iDb, iDb, iCol, nCons, pCons, iCol, pTab->zName
   );
 
-  /* Finally, reload the database schema. */
-  renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
+  /* Finally, reload the database schema.  This adds a constraint, so it
+  ** says so, even though the edit above drops any NOT NULL already there
+  ** before inserting the new one. */
+  renameReloadSchema(pParse, iDb, INITFLAG_AlterAddCons);
 }
 
 /*
@@ -3711,7 +3713,7 @@ void sqlite3AlterAddConstraint(
   );
 
   /* Finally, reload the database schema. */
-  renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
+  renameReloadSchema(pParse, iDb, INITFLAG_AlterAddCons);
 }
 
 /*
