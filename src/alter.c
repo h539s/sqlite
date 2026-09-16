@@ -4371,7 +4371,7 @@ void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
 /*
 ** Internal SQL function:
 **
-**     sqlite_set_strict(SQL, BSEP)
+**     sqlite_set_strict(ISCHEMA, SQL, BSEP)
 **
 ** SQL is a CREATE TABLE statement.  Return a copy of it with the STRICT
 ** table-option appended.  BSEP is true if the statement already carries a
@@ -4396,13 +4396,18 @@ static void setStrictFunc(
   sqlite3_value **argv
 ){
   sqlite3 *db = sqlite3_context_db_handle(ctx);
-  const char *zSql = (const char*)sqlite3_value_text(argv[0]);
-  int bSep = sqlite3_value_int(argv[1]);
+  int iSchema = sqlite3_value_int(argv[0]);
+  const char *zSql = (const char*)sqlite3_value_text(argv[1]);
+  int bSep = sqlite3_value_int(argv[2]);
   int nSql;
   char *zNew;
 
   UNUSED_PARAMETER(NotUsed);
-  if( zSql==0 ) return;
+  /* ISCHEMA is taken and checked so that every editor in this file is
+  ** called the same way, (ISCHEMA, SQL, ...).  This one has no use for it
+  ** beyond that: appending an option needs no reparse, so there is no
+  ** schema to reparse against. */
+  if( zSql==0 || iSchema<0 || iSchema>=db->nDb ) return;
 
   nSql = alterRtrimConstraint(db, zSql, sqlite3Strlen30(zSql));
   if( nSql<=0 ){
@@ -5108,9 +5113,9 @@ static void alterSetStrict(
   if( bOn ){
     sqlite3NestedParse(pParse,
         "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-        "sql = sqlite_set_strict(sql, %d) "
+        "sql = sqlite_set_strict(%d, sql, %d) "
         "WHERE type='table' AND name=%Q COLLATE nocase"
-        , zDb, (pTab->tabFlags & TF_WithoutRowid)!=0, pTab->zName
+        , zDb, iDb, (pTab->tabFlags & TF_WithoutRowid)!=0, pTab->zName
     );
   }else{
     sqlite3NestedParse(pParse,
@@ -5685,7 +5690,7 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_fail,           2, failConstraintFunc),
     INTERNAL_FUNCTION(sqlite_insert_constraint,4,insertConstraintFunc),
     INTERNAL_FUNCTION(sqlite_find_constraint,2, findConstraintFunc),
-    INTERNAL_FUNCTION(sqlite_set_strict,     2, setStrictFunc),
+    INTERNAL_FUNCTION(sqlite_set_strict,     3, setStrictFunc),
     INTERNAL_FUNCTION(sqlite_unset_strict,   2, unsetStrictFunc),
   };
   sqlite3InsertBuiltinFuncs(aAlterTableFuncs, ArraySize(aAlterTableFuncs));
