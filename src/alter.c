@@ -4757,9 +4757,21 @@ int sqlite3RunAlterTabOpt(
 
   assert( iDb>=0 && iDb<db->nDb );
   assert( iPhase==1 || iPhase==2 );
+
+  /* This runs from inside an opcode, so the only b-trees whose mutexes are
+  ** held are the ones the statement itself declared it would touch.  The
+  ** work below reparses stored CREATE TABLE statements, and a reparse can
+  ** reach sqlite3ReadSchema(), which requires every schema's mutex - the
+  ** main one included, even when the table being rebuilt lives in temp.
+  ** Take them all for the duration. */
+  sqlite3BtreeEnterAll(db);
+
   zDb = db->aDb[iDb].zDbSName;
   zTmp = alterRebuildName(db, zTab);
-  if( zTmp==0 ) return SQLITE_NOMEM_BKPT;
+  if( zTmp==0 ){
+    rc = SQLITE_NOMEM_BKPT;
+    goto alter_tabopt_out;
+  }
 
   if( iPhase==2 ){
     /* The original is gone.  Give the replacement its name and put the
@@ -4799,8 +4811,7 @@ int sqlite3RunAlterTabOpt(
       sqlite3DbFree(db, az);
       db->pAlterRedo = 0;
     }
-    sqlite3DbFree(db, zTmp);
-    return rc;
+    goto alter_tabopt_out;
   }
 
   /* Phase 1.  Discard any hand-off left behind by a run that failed
@@ -4925,6 +4936,7 @@ alter_tabopt_out:
   sqlite3DbFree(db, zNewSql);
   sqlite3DbFree(db, zCols);
   sqlite3DbFree(db, zTmp);
+  sqlite3BtreeLeaveAll(db);
   return rc;
 }
 
