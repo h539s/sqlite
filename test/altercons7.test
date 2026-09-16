@@ -9,10 +9,10 @@
 #
 #*************************************************************************
 #
-# Tests for ALTER TABLE <table> DROP CONSTRAINT DEFAULT <column>.
+# Tests for ALTER TABLE <table> COLUMN <column> DROP DEFAULT.
 #
-# A DEFAULT need not have a name, so it is dropped by kind, and it belongs
-# to one column, so the column is named instead.  Nothing but the stored
+# A DEFAULT belongs to one column and carries no name, so it is dropped by
+# kind with the column named.  Nothing but the stored
 # text changes: no row is rewritten, so a row inserted before the drop
 # keeps the value the DEFAULT gave it, and one inserted after gets NULL.
 #
@@ -99,7 +99,7 @@ foreach {tn col before after} {
   reset_db
   do_execsql_test 1.$tn.1 $before
   do_execsql_test 1.$tn.2 "
-    ALTER TABLE t1 DROP CONSTRAINT DEFAULT \"$col\";
+    ALTER TABLE t1 COLUMN \"$col\" DROP DEFAULT;
     SELECT sql FROM sqlite_schema WHERE name='t1';
   " [list [string trim $after]]
   do_execsql_test 1.$tn.3 { PRAGMA integrity_check } {ok}
@@ -112,7 +112,7 @@ foreach {tn col before after} {
 reset_db
 do_execsql_test 1.19.1 {
   CREATE TABLE t1(a INT /*keep*/ DEFAULT 5 /*go*/, b);
-  ALTER TABLE t1 DROP CONSTRAINT DEFAULT a;
+  ALTER TABLE t1 COLUMN a DROP DEFAULT;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT /*keep*/, b)}}
 
@@ -144,7 +144,7 @@ foreach {tn col before after} {
   reset_db
   execsql $before
   do_execsql_test 2.$tn.1 "
-    ALTER TABLE t1 DROP CONSTRAINT DEFAULT $col;
+    ALTER TABLE t1 COLUMN $col DROP DEFAULT;
     $probe
   " $ref
   do_execsql_test 2.$tn.2 { PRAGMA integrity_check } {ok}
@@ -161,7 +161,7 @@ do_execsql_test 3.0 {
   INSERT INTO t1 VALUES(99, 2);
 }
 do_execsql_test 3.1 {
-  ALTER TABLE t1 DROP CONSTRAINT DEFAULT a;
+  ALTER TABLE t1 COLUMN a DROP DEFAULT;
   INSERT INTO t1(b) VALUES(3);
   SELECT b, quote(a) FROM t1 ORDER BY b;
 } {1 5 2 99 3 NULL}
@@ -172,7 +172,7 @@ do_execsql_test 3.2 { PRAGMA integrity_check } {ok}
 reset_db
 do_execsql_test 3.3 {
   CREATE TABLE t1(a DEFAULT 1, b DEFAULT 2);
-  ALTER TABLE t1 DROP CONSTRAINT DEFAULT a;
+  ALTER TABLE t1 COLUMN a DROP DEFAULT;
   INSERT INTO t1 DEFAULT VALUES;
   SELECT quote(a), quote(b) FROM t1;
 } {NULL 2}
@@ -185,7 +185,7 @@ do_execsql_test 3.3 {
 reset_db
 do_execsql_test 4.1 {
   CREATE TABLE t1(a INT, b);
-  ALTER TABLE t1 DROP CONSTRAINT DEFAULT a;
+  ALTER TABLE t1 COLUMN a DROP DEFAULT;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT, b)}}
 
@@ -194,8 +194,8 @@ do_execsql_test 4.1 {
 reset_db
 do_execsql_test 4.2 {
   CREATE TABLE t1(a INT DEFAULT 5, b);
-  ALTER TABLE t1 DROP CONSTRAINT DEFAULT a;
-  ALTER TABLE t1 DROP CONSTRAINT DEFAULT a;
+  ALTER TABLE t1 COLUMN a DROP DEFAULT;
+  ALTER TABLE t1 COLUMN a DROP DEFAULT;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT, b)}}
 
@@ -205,7 +205,7 @@ ifcapable altertable {
   reset_db
   do_execsql_test 4.3 {
     CREATE TABLE t1(a INT, b AS (a+1));
-    ALTER TABLE t1 DROP CONSTRAINT DEFAULT b;
+    ALTER TABLE t1 COLUMN b DROP DEFAULT;
     SELECT sql FROM sqlite_schema WHERE name='t1';
   } {{CREATE TABLE t1(a INT, b AS (a+1))}}
 }
@@ -216,7 +216,7 @@ ifcapable altertable {
 reset_db
 do_execsql_test 5.0 { CREATE TABLE t1(a INT DEFAULT 5, b) }
 do_catchsql_test 5.1 {
-  ALTER TABLE t1 DROP CONSTRAINT DEFAULT zz;
+  ALTER TABLE t1 COLUMN zz DROP DEFAULT;
 } {1 {no such column: zz}}
 do_execsql_test 5.2 {
   SELECT sql FROM sqlite_schema WHERE name='t1';
@@ -224,15 +224,15 @@ do_execsql_test 5.2 {
 
 do_catchsql_test 5.3 {
   CREATE VIEW v1 AS SELECT 1 AS x;
-  ALTER TABLE v1 DROP CONSTRAINT DEFAULT x;
+  ALTER TABLE v1 COLUMN x DROP DEFAULT;
 } {1 {cannot edit constraints of view "v1"}}
 
 do_catchsql_test 5.4 {
-  ALTER TABLE nosuchtable DROP CONSTRAINT DEFAULT a;
+  ALTER TABLE nosuchtable COLUMN a DROP DEFAULT;
 } {1 {no such table: nosuchtable}}
 
 do_catchsql_test 5.5 {
-  ALTER TABLE sqlite_schema DROP CONSTRAINT DEFAULT a;
+  ALTER TABLE sqlite_schema COLUMN a DROP DEFAULT;
 } {1 {table sqlite_master may not be altered}}
 
 #-------------------------------------------------------------------------
@@ -246,7 +246,7 @@ do_execsql_test 6.1.0 {
   INSERT INTO aux.t1(b) VALUES(1);
 }
 do_execsql_test 6.1.1 {
-  ALTER TABLE aux.t1 DROP CONSTRAINT DEFAULT a;
+  ALTER TABLE aux.t1 COLUMN a DROP DEFAULT;
   SELECT sql FROM aux.sqlite_schema WHERE name='t1';
   SELECT quote(a) FROM aux.t1;
 } {{CREATE TABLE t1(a INT, b)} 5}
@@ -255,7 +255,7 @@ do_execsql_test 6.1.2 { PRAGMA aux.integrity_check } {ok}
 reset_db
 do_execsql_test 6.2.0 {
   CREATE TEMP TABLE t1(a INT DEFAULT 5, b);
-  ALTER TABLE t1 DROP CONSTRAINT DEFAULT a;
+  ALTER TABLE t1 COLUMN a DROP DEFAULT;
   SELECT sql FROM temp.sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT, b)}}
 
@@ -265,7 +265,7 @@ reset_db
 do_execsql_test 6.3.0 {
   CREATE TABLE t1(a INT DEFAULT 5, b);
   CREATE TEMP TABLE t1(a INT DEFAULT 5, b);
-  ALTER TABLE t1 DROP CONSTRAINT DEFAULT a;
+  ALTER TABLE t1 COLUMN a DROP DEFAULT;
   SELECT sql FROM temp.sqlite_schema WHERE name='t1';
   SELECT sql FROM main.sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a INT, b)} {CREATE TABLE t1(a INT DEFAULT 5, b)}}
@@ -277,7 +277,7 @@ reset_db
 do_execsql_test 7.1 {
   CREATE TABLE t1(a INT DEFAULT 5, b);
   BEGIN;
-    ALTER TABLE t1 DROP CONSTRAINT DEFAULT a;
+    ALTER TABLE t1 COLUMN a DROP DEFAULT;
   ROLLBACK;
   INSERT INTO t1(b) VALUES(1);
   SELECT sql FROM sqlite_schema WHERE name='t1';
@@ -296,7 +296,7 @@ do_execsql_test 8.1.0 {
   PRAGMA writable_schema = 0;
 }
 do_catchsql_test 8.1.1 {
-  ALTER TABLE t1 DROP CONSTRAINT DEFAULT a;
+  ALTER TABLE t1 COLUMN a DROP DEFAULT;
 } {1 {database disk image is malformed}}
 do_execsql_test 8.1.2 {
   PRAGMA writable_schema = 1;
