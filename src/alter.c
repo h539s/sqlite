@@ -5262,7 +5262,7 @@ static void alterSetWithoutRowid(
 /*
 ** Generate bytecode to implement:
 **
-**    ALTER TABLE pSrc SET <table-option> = ON|OFF
+**    ALTER TABLE pSrc SET <table-option> ON|OFF
 **
 ** Validate the table and the option name, short-circuit when the option
 ** already has the requested value, and hand off to the routine that knows
