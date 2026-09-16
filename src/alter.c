@@ -4389,7 +4389,6 @@ static void unsetStrictFunc(
   int iSchema = sqlite3_value_int(argv[0]);
   const char *zSql = (const char*)sqlite3_value_text(argv[1]);
   AlterEdit x;
-  char *zNew;
   int nKeep;
 
   UNUSED_PARAMETER(NotUsed);
@@ -4402,15 +4401,16 @@ static void unsetStrictFunc(
 
   nKeep = (int)(&x.sParse.sColListEnd.z[x.sParse.sColListEnd.n] - zSql);
   assert( nKeep>0 && nKeep<=sqlite3Strlen30(zSql) );
-  zNew = sqlite3MPrintf(db, "%.*s%s", nKeep, zSql,
+  /* Handed to the edit so that it is freed on the way out with everything
+  ** else this function borrowed. */
+  x.zOut = sqlite3MPrintf(db, "%.*s%s", nKeep, zSql,
       (x.pTab->tabFlags & TF_WithoutRowid)!=0 ? " WITHOUT ROWID" : ""
   );
-  if( zNew==0 ){
+  if( x.zOut==0 ){
     x.rc = SQLITE_NOMEM_BKPT;
     goto unset_strict_done;
   }
-  sqlite3_result_text(ctx, zNew, -1, SQLITE_TRANSIENT);
-  sqlite3DbFree(db, zNew);
+  sqlite3_result_text(ctx, x.zOut, -1, SQLITE_TRANSIENT);
 
 unset_strict_done:
   alterEditFinish(&x, ctx);
