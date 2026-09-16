@@ -400,7 +400,7 @@ ccons ::= CONSTRAINT(C) nm(X). {
   pParse->u1.cr.zConsEnd = &X.z[X.n];
 }
 // Each of these records where the clause sits, for ALTER TABLE ...
-// DROP CONSTRAINT DEFAULT.  Only during the reparse of a stored statement.
+// COLUMN <c> DROP DEFAULT.  Only during the reparse of a stored statement.
 ccons ::= DEFAULT(D) scantok(A) term(X). {
   sqlite3AddDefaultValue(pParse,X,A.z,&A.z[A.n]);
   if( IN_RENAME_OBJECT ) sqlite3DefaultLocAdd(pParse, &D);
@@ -1966,10 +1966,9 @@ cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT nm(Y). {
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT PRIMARY KEY. {
   sqlite3AlterDropPrimaryKey(pParse, X);
 }
-// A DEFAULT need not have a name either, and it belongs to one column, so
-// the column is named instead.  DEFAULT is reserved on the same reasoning
-// as PRIMARY above.
-cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT DEFAULT nm(Y). {
+// A DEFAULT belongs to one column rather than to the table, so the column
+// is named and the constraint is reached by kind.
+cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) DROP DEFAULT. {
   sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_default");
 }
 // A FOREIGN KEY need not have a name either, so it is named by what it

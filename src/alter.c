@@ -766,7 +766,7 @@ struct RenameToken {
 **                      the clause is found by kind.
 **
 **   PARSELOC_Default   The extent of a DEFAULT clause, taken in by
-**                      ALTER TABLE ... DROP CONSTRAINT DEFAULT.  A column
+**                      ALTER TABLE ... COLUMN <c> DROP DEFAULT.  A column
 **                      can carry more than one - SQLite lets the last win
 **                      - so there can be several entries with the same
 **                      iCol.
@@ -2663,7 +2663,7 @@ void sqlite3FkLocExtend(Parse *pParse, const char *zEnd){
 
 /*
 ** Record where a column's DEFAULT clause sits, so that ALTER TABLE ...
-** DROP CONSTRAINT DEFAULT can cut it out without looking for it.
+** COLUMN <c> DROP DEFAULT can cut it out without looking for it.
 **
 ** pKw is the DEFAULT keyword.  sqlite3ConsLocAdd() takes in everything that
 ** follows it up to the end of the last real token - the value, however it
