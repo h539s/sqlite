@@ -3426,6 +3426,43 @@ static Table *alterFindTable(
 }
 
 /*
+** Emit the statement that puts an edited CREATE TABLE back in the schema.
+**
+** Every command in this file that edits schema text finishes the same way:
+** one UPDATE of the row holding pTab's CREATE statement, setting sql to
+** what an editor makes of it.  The editor call is the only part that
+** differs between them, and arrives here as a printf format and its
+** arguments.
+**
+** Keeping the UPDATE in one place keeps its WHERE clause in one place too.
+** A mistake there does not fail loudly: it edits the wrong row, or none.
+*/
+static void alterUpdateSchemaSql(
+  Parse *pParse,        /* Parse context */
+  Table *pTab,          /* Table whose stored statement is being edited */
+  const char *zDb,      /* Name of the schema holding it */
+  const char *zFmt,     /* The editor call, as a printf format */
+  ...
+){
+  sqlite3 *db = pParse->db;
+  char *zEdit;
+  va_list ap;
+
+  va_start(ap, zFmt);
+  zEdit = sqlite3VMPrintf(db, zFmt, ap);
+  va_end(ap);
+  if( zEdit==0 ) return;   /* sqlite3VMPrintf() has already recorded the OOM */
+
+  sqlite3NestedParse(pParse,
+      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
+      "sql = %s "
+      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
+      , zDb, zEdit, pTab->zName
+  );
+  sqlite3DbFree(db, zEdit);
+}
+
+/*
 ** Generate bytecode for one of:
 **
 **  (1)   ALTER TABLE pSrc DROP CONSTRAINT pCons
@@ -3470,12 +3507,7 @@ void sqlite3AlterDropConstraint(
   }
 
   /* Edit the SQL for the named table. */
-  sqlite3NestedParse(pParse,
-      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = %s "
-      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, zArg, pTab->zName
-  );
+  alterUpdateSchemaSql(pParse, pTab, zDb, "%s", zArg);
   sqlite3DbFree(db, zArg);
 
   /* Finally, reload the database schema. */
@@ -3578,12 +3610,9 @@ void sqlite3AlterSetNotNull(
   );
 
   /* Edit the SQL for the named table. */
-  sqlite3NestedParse(pParse,
-      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_insert_constraint(%d, "
-              "sqlite_drop_notnull(%d, sql, %d), %.*Q, %d) "
-      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iDb, iDb, iCol, nCons, pCons, iCol, pTab->zName
+  alterUpdateSchemaSql(pParse, pTab, zDb,
+      "sqlite_insert_constraint(%d, sqlite_drop_notnull(%d, sql, %d), %.*Q, %d)",
+      iDb, iDb, iCol, nCons, pCons, iCol
   );
 
   /* Finally, reload the database schema.  This adds a constraint, so it
@@ -3705,11 +3734,8 @@ void sqlite3AlterAddConstraint(
   pCons = pFirst->z;
   nCons = alterRtrimConstraint(pParse->db, pCons, pParse->sLastToken.z - pCons);
 
-  sqlite3NestedParse(pParse,
-      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_insert_constraint(%d, sql, %.*Q, -1) "
-      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iDb, nCons, pCons, pTab->zName
+  alterUpdateSchemaSql(pParse, pTab, zDb,
+      "sqlite_insert_constraint(%d, sql, %.*Q, -1)", iDb, nCons, pCons
   );
 
   /* Finally, reload the database schema. */
@@ -3751,11 +3777,8 @@ static void alterAddConstraintText(
     );
   }
 
-  sqlite3NestedParse(pParse,
-      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_insert_constraint(%d, sql, %.*Q, %d) "
-      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iDb, nCons, zCons, iCol, pTab->zName
+  alterUpdateSchemaSql(pParse, pTab, zDb,
+      "sqlite_insert_constraint(%d, sql, %.*Q, %d)", iDb, nCons, zCons, iCol
   );
 
   renameReloadSchema(pParse, iDb, INITFLAG_AlterAddCons);
@@ -4257,12 +4280,7 @@ void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
   }
 
   /* Take the clause out of the stored statement. */
-  sqlite3NestedParse(pParse,
-      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_drop_pk(%d, sql) "
-      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iDb, pTab->zName
-  );
+  alterUpdateSchemaSql(pParse, pTab, zDb, "sqlite_drop_pk(%d, sql)", iDb);
 
   /* And take away the index that went with it. */
   sqlite3CodeDropIndex(pParse, pPk, iDb);
@@ -5296,12 +5314,7 @@ void sqlite3AlterDropForeignKey(
   zArg = sqlite3MPrintf(db, "%z)", zArg);
   if( zArg==0 ) goto drop_fk_exit;
 
-  sqlite3NestedParse(pParse,
-      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = %s "
-      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, zArg, pTab->zName
-  );
+  alterUpdateSchemaSql(pParse, pTab, zDb, "%s", zArg);
 
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
 
@@ -5329,12 +5342,7 @@ void sqlite3AlterDropCheck(Parse *pParse, SrcList *pSrc){
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
   if( pTab==0 ) return;
 
-  sqlite3NestedParse(pParse,
-      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-      "sql = sqlite_drop_check(%d, sql, -1) "
-      "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-      , zDb, iDb, pTab->zName
-  );
+  alterUpdateSchemaSql(pParse, pTab, zDb, "sqlite_drop_check(%d, sql, -1)", iDb);
 
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
 }
@@ -5548,11 +5556,8 @@ void sqlite3AlterSetColumnType(
   if( bRebuild ){
     alterCodeRebuild(pParse, pTab, iDb, zCol, zType, 0);
   }else{
-    sqlite3NestedParse(pParse,
-        "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
-        "sql = sqlite_set_coltype(%d, sql, %d, %Q) "
-        "WHERE type='table' AND tbl_name=%Q COLLATE nocase"
-        , zDb, iDb, iCol, zType, pTab->zName
+    alterUpdateSchemaSql(pParse, pTab, zDb,
+        "sqlite_set_coltype(%d, sql, %d, %Q)", iDb, iCol, zType
     );
     renameReloadSchema(pParse, iDb, INITFLAG_AlterSetType);
   }
