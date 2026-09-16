@@ -159,11 +159,60 @@ do_auth_test 1.6 {
 do_auth_test 1.7 {
   ALTER TABLE t2 DROP CONSTRAINT abc;
 } {
-  {SQLITE_ALTER_TABLE main t2 {} {}} 
-  {SQLITE_FUNCTION {} sqlite_drop_constraint {} {}} 
-  {SQLITE_READ sqlite_master sql main {}} 
-  {SQLITE_READ sqlite_master tbl_name main {}} 
-  {SQLITE_READ sqlite_master type main {}} 
+  {SQLITE_ALTER_TABLE main t2 {} {}}
+  {SQLITE_FUNCTION {} sqlite_drop_constraint {} {}}
+  {SQLITE_READ sqlite_master sql main {}}
+  {SQLITE_READ sqlite_master tbl_name main {}}
+  {SQLITE_READ sqlite_master type main {}}
+  {SQLITE_UPDATE sqlite_master sql main {}}
+}
+
+# 1.8-1.11: the commands that name a column raise SQLITE_ALTER_TABLE once,
+# with the column name in it - never a second time with the column left
+# empty.  A command that names a column reports one change, so the
+# authorizer has to see one callback for it.
+#
+do_auth_test 1.8 {
+  ALTER TABLE t2 COLUMN b ADD DEFAULT 5;
+} {
+  {SQLITE_ALTER_TABLE main t2 b {}}
+  {SQLITE_FUNCTION {} sqlite_insert_constraint {} {}}
+  {SQLITE_READ sqlite_master sql main {}}
+  {SQLITE_READ sqlite_master tbl_name main {}}
+  {SQLITE_READ sqlite_master type main {}}
+  {SQLITE_UPDATE sqlite_master sql main {}}
+}
+do_auth_test 1.9 {
+  ALTER TABLE t2 COLUMN b DROP DEFAULT;
+} {
+  {SQLITE_ALTER_TABLE main t2 b {}}
+  {SQLITE_FUNCTION {} sqlite_drop_default {} {}}
+  {SQLITE_READ sqlite_master sql main {}}
+  {SQLITE_READ sqlite_master tbl_name main {}}
+  {SQLITE_READ sqlite_master type main {}}
+  {SQLITE_UPDATE sqlite_master sql main {}}
+}
+do_auth_test 1.10 {
+  ALTER TABLE t2 COLUMN b DROP CHECK;
+} {
+  {SQLITE_ALTER_TABLE main t2 b {}}
+  {SQLITE_FUNCTION {} sqlite_drop_check {} {}}
+  {SQLITE_READ sqlite_master sql main {}}
+  {SQLITE_READ sqlite_master tbl_name main {}}
+  {SQLITE_READ sqlite_master type main {}}
+  {SQLITE_UPDATE sqlite_master sql main {}}
+}
+# BLOB is the affinity an untyped column already has, so this one is a
+# schema-text edit.  The rebuild route renames a shadow table and would
+# bring that table's own SQLITE_ALTER_TABLE with it.
+do_auth_test 1.11 {
+  ALTER TABLE t2 COLUMN b SET TYPE BLOB;
+} {
+  {SQLITE_ALTER_TABLE main t2 b {}}
+  {SQLITE_FUNCTION {} sqlite_set_coltype {} {}}
+  {SQLITE_READ sqlite_master sql main {}}
+  {SQLITE_READ sqlite_master tbl_name main {}}
+  {SQLITE_READ sqlite_master type main {}}
   {SQLITE_UPDATE sqlite_master sql main {}}
 }
 

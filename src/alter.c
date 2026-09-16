@@ -3961,8 +3961,12 @@ void sqlite3AlterAddDefault(
   const char *zDb = 0;
   char *zCons = 0;
 
+  /* bAuth is 0 here, as in every other command that names a column:
+  ** alterFindCol() below raises the SQLITE_ALTER_TABLE callback with the
+  ** column name, and raising it twice for one statement would report the
+  ** same change to the authorizer as two. */
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0, 2);
   if( pTab==0 ) goto add_default_exit;
   if( alterFindCol(pParse, pTab, pCol, &iCol) ) goto add_default_exit;
 
@@ -5610,8 +5614,10 @@ void sqlite3AlterSetColumnType(
   char *zType = 0;
   int bRebuild;
 
+  /* bAuth is 0 for the same reason as in sqlite3AlterAddDefault(): the
+  ** callback is raised once, by alterFindCol(), with the column name. */
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0, 2);
   if( pTab==0 ) return;
   if( pType->n==0 ){
     sqlite3ErrorMsg(pParse, "no type given for column \"%T\"", pCol);
