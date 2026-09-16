@@ -3051,6 +3051,112 @@ static int alterExciseClause(
 }
 
 /*
+** The state that every schema-text editor keeps while it works.
+**
+** Five of the internal SQL functions in this file edit a stored CREATE
+** TABLE by reparsing it, and all five open and close the same way.  They
+** open by taking (ISCHEMA, SQL), turning the authorizer off for the
+** duration, reparsing the statement, and checking that what came back is
+** an ordinary table.  They close by releasing that parse, freeing the
+** working copy and putting the authorizer back.  alterEditBegin() and
+** alterEditFinish() are those two ends.  What each function does in
+** between is its own business and stays in its own body.
+**
+** The authorizer is turned off because the reparse is not the user's
+** statement: it is this file re-reading a statement the user already ran.
+*/
+typedef struct AlterEdit AlterEdit;
+struct AlterEdit {
+  sqlite3 *db;            /* Database handle */
+  Parse sParse;           /* The reparsed CREATE TABLE */
+  Table *pTab;            /* sParse.pNewTable, once it has been checked */
+  const char *zSql;       /* The statement as stored */
+  char *zOut;             /* Working copy of zSql, or 0 */
+  int nOut;               /* Bytes of zOut in use */
+  int rc;                 /* Error to report, or SQLITE_OK */
+  int bParsed;            /* True once sParse needs releasing */
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  sqlite3_xauth xAuth;    /* Authorizer to put back */
+#endif
+};
+
+/*
+** Open an edit of zSql, which belongs to schema iSchema.
+**
+** Return true if p->sParse and p->pTab are ready to be read.  Return false
+** if they are not, in which case the caller goes straight to
+** alterEditFinish(), which is safe either way.  A missing or out-of-range
+** argument is not an error - the statement is simply returned unchanged,
+** as these functions have always done - but a statement that does not
+** reparse into an ordinary table is SQLITE_CORRUPT: it is the definition
+** of the very table being altered.
+*/
+static int alterEditBegin(
+  AlterEdit *p,           /* The edit to open */
+  sqlite3 *db,            /* Database handle */
+  int iSchema,            /* Schema the statement belongs to */
+  const char *zSql        /* The stored CREATE TABLE */
+){
+  memset(p, 0, sizeof(*p));
+  p->db = db;
+  p->zSql = zSql;
+  p->rc = SQLITE_OK;
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  p->xAuth = db->xAuth;
+  db->xAuth = 0;
+#endif
+
+  if( zSql==0 || iSchema<0 || iSchema>=db->nDb ) return 0;
+
+  if( renameParseSql(&p->sParse, db->aDb[iSchema].zDbSName, db, zSql,
+                     iSchema==1) )
+  {
+    p->bParsed = 1;
+    p->rc = SQLITE_CORRUPT_BKPT;
+    return 0;
+  }
+  p->bParsed = 1;
+  p->pTab = p->sParse.pNewTable;
+  if( p->pTab==0 || !IsOrdinaryTable(p->pTab) ){
+    p->rc = SQLITE_CORRUPT_BKPT;
+    return 0;
+  }
+  return 1;
+}
+
+/*
+** Give the edit a private copy of the statement to cut and splice.  The
+** callers that work by excising clauses need one; those that build the
+** result with sqlite3MPrintf() do not.  Returns true on success.
+*/
+static int alterEditCopy(AlterEdit *p){
+  assert( p->zOut==0 );
+  p->nOut = sqlite3Strlen30(p->zSql);
+  p->zOut = sqlite3DbMallocRaw(p->db, (i64)p->nOut+1);
+  if( p->zOut==0 ){
+    p->rc = SQLITE_NOMEM_BKPT;
+    return 0;
+  }
+  memcpy(p->zOut, p->zSql, (size_t)p->nOut+1);
+  return 1;
+}
+
+/*
+** Close an edit opened by alterEditBegin(), whether or not it succeeded.
+**
+** The caller has already set the result it wants, if any; this only puts
+** back what was borrowed and reports the error, if there is one.
+*/
+static void alterEditFinish(AlterEdit *p, sqlite3_context *ctx){
+  if( p->bParsed ) renameParseCleanup(&p->sParse);
+  sqlite3DbFree(p->db, p->zOut);
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  p->db->xAuth = p->xAuth;
+#endif
+  if( p->rc!=SQLITE_OK ) sqlite3_result_error_code(ctx, p->rc);
+}
+
+/*
 ** Shared implementation of the internal SQL functions
 **
 **     sqlite_drop_notnull(ISCHEMA, SQL, COLNAME)
@@ -3083,73 +3189,42 @@ static void dropColConsFunc(
   int iSchema = sqlite3_value_int(argv[0]);
   const char *zSql = (const char*)sqlite3_value_text(argv[1]);
   const char *zCol = (const char*)sqlite3_value_text(argv[2]);
-  const char *zDb;
-  Table *pTab;
-  Parse sParse;
-  char *zOut = 0;
-  int nOut = 0;
+  AlterEdit x;
   int iCol;
-  int rc;
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  sqlite3_xauth xAuth = db->xAuth;
-  db->xAuth = 0;
-#endif
 
-  if( zSql==0 || iSchema<0 || iSchema>=db->nDb
-   || (zCol==0 && !bTabCons)
-  ){
-    rc = SQLITE_OK;
-    goto drop_notnull_done;
+  if( zCol==0 && !bTabCons ){
+    /* This form needs a column and was given none. */
+    return;
   }
-  zDb = db->aDb[iSchema].zDbSName;
+  if( !alterEditBegin(&x, db, iSchema, zSql) ) goto drop_col_cons_done;
 
-  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
-  if( rc!=SQLITE_OK ){
-    /* The stored statement does not parse.  It is the definition of the very
-    ** table being altered, so there is nothing sensible to do with it. */
-    rc = SQLITE_CORRUPT_BKPT;
-    goto drop_notnull_cleanup;
-  }
-  pTab = sParse.pNewTable;
-  if( pTab==0 || !IsOrdinaryTable(pTab) ){
-    rc = SQLITE_CORRUPT_BKPT;
-    goto drop_notnull_cleanup;
-  }
   if( zCol==0 ){
     /* No column named: the clauses written at table level, which are the
     ** ones recorded against no column. */
     iCol = -1;
-    goto drop_notnull_edit;
-  }
-  iCol = alterColumnIndex(pTab, zCol);
-  if( iCol<0 ){
-    /* The stored definition has no such column.  That definition is what the
-    ** table will be once the schema is next loaded, so this is a real "no
-    ** such column", not a corrupt statement. */
-    errorMPrintf(ctx, "no such column: %s", zCol);
-    rc = SQLITE_OK;
-    goto drop_notnull_cleanup;
+  }else{
+    iCol = alterColumnIndex(x.pTab, zCol);
+    if( iCol<0 ){
+      /* The stored definition has no such column.  That definition is what
+      ** the table will be once the schema is next loaded, so this is a real
+      ** "no such column", not a corrupt statement. */
+      errorMPrintf(ctx, "no such column: %s", zCol);
+      goto drop_col_cons_done;
+    }
   }
 
-drop_notnull_edit:
-  nOut = sqlite3Strlen30(zSql);
-  zOut = sqlite3DbMallocRaw(db, (i64)nOut+1);
-  if( zOut==0 ){
-    rc = SQLITE_NOMEM_BKPT;
-    goto drop_notnull_cleanup;
-  }
-  memcpy(zOut, zSql, (size_t)nOut+1);
+  if( !alterEditCopy(&x) ) goto drop_col_cons_done;
 
   /* Excise the right-most constraint still to be removed, then repeat.
   ** Working right to left means every offset not yet used still addresses
   ** the same byte of zOut that it addressed in zSql.  Entries that have
-  ** been dealt with are marked by setting iCol to -1 rather than being
+  ** been dealt with are marked by setting eType to 0 rather than being
   ** unlinked, so that the list stays owned by sParse. */
   while( 1 ){
     ParseLoc *p;
     ParseLoc *pBest = 0;
 
-    for(p=sParse.pLoc; p; p=p->pNext){
+    for(p=x.sParse.pLoc; p; p=p->pNext){
       if( p->eType!=eType || p->iCol!=iCol ) continue;
       if( pBest==0 || p->t.z>pBest->t.z ) pBest = p;
     }
@@ -3158,22 +3233,13 @@ drop_notnull_edit:
                            ** -1 is a real value, meaning a table-level
                            ** constraint, and is what the form that names
                            ** no column matches on. */
-    nOut = alterExciseClause(zOut, nOut, zSql, &pBest->t);
+    x.nOut = alterExciseClause(x.zOut, x.nOut, x.zSql, &pBest->t);
   }
 
-  sqlite3_result_text(ctx, zOut, nOut, SQLITE_TRANSIENT);
+  sqlite3_result_text(ctx, x.zOut, x.nOut, SQLITE_TRANSIENT);
 
-drop_notnull_cleanup:
-  renameParseCleanup(&sParse);
-  sqlite3DbFree(db, zOut);
-
-drop_notnull_done:
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  db->xAuth = xAuth;
-#endif
-  if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
-  }
+drop_col_cons_done:
+  alterEditFinish(&x, ctx);
 }
 
 /*
@@ -3249,86 +3315,53 @@ static void insertConstraintFunc(
   const char *zSql = (const char*)sqlite3_value_text(argv[1]);
   const char *zCons = (const char*)sqlite3_value_text(argv[2]);
   const char *zCol = (const char*)sqlite3_value_text(argv[3]);
-  const char *zDb;
-  Table *pTab;
-  Parse sParse;
-  char *zNew;
+  AlterEdit x;
   int iOff;
   int iCol;
-  int rc;
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  sqlite3_xauth xAuth = db->xAuth;
-  db->xAuth = 0;
-#endif
 
   UNUSED_PARAMETER(NotUsed);
-  if( zSql==0 || zCons==0 || iSchema<0 || iSchema>=db->nDb ){
-    rc = SQLITE_OK;
-    goto insert_cons_done;
-  }
-  zDb = db->aDb[iSchema].zDbSName;
+  if( zCons==0 ) return;
+  if( !alterEditBegin(&x, db, iSchema, zSql) ) goto insert_cons_done;
 
-  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
-  if( rc!=SQLITE_OK ){
-    /* The stored statement does not parse.  It is the definition of the very
-    ** table being altered, so there is nothing sensible to do with it. */
-    rc = SQLITE_CORRUPT_BKPT;
-    goto insert_cons_cleanup;
-  }
-  pTab = sParse.pNewTable;
-  if( pTab==0 || !IsOrdinaryTable(pTab) ){
-    rc = SQLITE_CORRUPT_BKPT;
-    goto insert_cons_cleanup;
-  }
   /* A NULL column name asks for a table-constraint.  Otherwise the name is
   ** resolved against the stored text, not against the in-memory Table. */
   if( zCol==0 ){
     iCol = -1;
   }else{
-    iCol = alterColumnIndex(pTab, zCol);
+    iCol = alterColumnIndex(x.pTab, zCol);
     if( iCol<0 ){
       errorMPrintf(ctx, "no such column: %s", zCol);
-      rc = SQLITE_OK;
-      goto insert_cons_cleanup;
+      goto insert_cons_done;
     }
   }
 
   if( iCol<0 ){
-    if( sParse.sColListEnd.z==0 ){
-      rc = SQLITE_CORRUPT_BKPT;
-      goto insert_cons_cleanup;
+    if( x.sParse.sColListEnd.z==0 ){
+      x.rc = SQLITE_CORRUPT_BKPT;
+      goto insert_cons_done;
     }
-    iOff = (int)(sParse.sColListEnd.z - zSql);
-    zNew = sqlite3MPrintf(db, "%.*s, %s%s", iOff, zSql, zCons, &zSql[iOff]);
+    iOff = (int)(x.sParse.sColListEnd.z - zSql);
+    x.zOut = sqlite3MPrintf(db, "%.*s, %s%s", iOff, zSql, zCons, &zSql[iOff]);
   }else{
     ParseLoc *p;
-    for(p=sParse.pLoc; p; p=p->pNext){
+    for(p=x.sParse.pLoc; p; p=p->pNext){
       if( p->eType==PARSELOC_ColDef && p->iCol==iCol ) break;
     }
     if( p==0 ){
-      rc = SQLITE_CORRUPT_BKPT;
-      goto insert_cons_cleanup;
+      x.rc = SQLITE_CORRUPT_BKPT;
+      goto insert_cons_done;
     }
     iOff = (int)(p->t.z - zSql) + (int)p->t.n;
-    zNew = sqlite3MPrintf(db, "%.*s %s%s", iOff, zSql, zCons, &zSql[iOff]);
+    x.zOut = sqlite3MPrintf(db, "%.*s %s%s", iOff, zSql, zCons, &zSql[iOff]);
   }
-  if( zNew==0 ){
-    rc = SQLITE_NOMEM_BKPT;
-    goto insert_cons_cleanup;
+  if( x.zOut==0 ){
+    x.rc = SQLITE_NOMEM_BKPT;
+    goto insert_cons_done;
   }
-  sqlite3_result_text(ctx, zNew, -1, SQLITE_TRANSIENT);
-  sqlite3DbFree(db, zNew);
-
-insert_cons_cleanup:
-  renameParseCleanup(&sParse);
+  sqlite3_result_text(ctx, x.zOut, -1, SQLITE_TRANSIENT);
 
 insert_cons_done:
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  db->xAuth = xAuth;
-#endif
-  if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
-  }
+  alterEditFinish(&x, ctx);
 }
 
 /*
@@ -4035,65 +4068,28 @@ static void dropPkFunc(
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   int iSchema = sqlite3_value_int(argv[0]);
   const char *zSql = (const char*)sqlite3_value_text(argv[1]);
-  const char *zDb;
+  AlterEdit x;
   ParseLoc *p;
-  Parse sParse;
-  char *zOut = 0;
-  int nOut = 0;
-  int rc;
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  sqlite3_xauth xAuth = db->xAuth;
-  db->xAuth = 0;
-#endif
 
   UNUSED_PARAMETER(NotUsed);
-  if( zSql==0 || iSchema<0 || iSchema>=db->nDb ){
-    rc = SQLITE_OK;
-    goto drop_pk_done;
-  }
-  zDb = db->aDb[iSchema].zDbSName;
+  if( !alterEditBegin(&x, db, iSchema, zSql) ) goto drop_pk_done;
 
-  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
-  if( rc!=SQLITE_OK ){
-    rc = SQLITE_CORRUPT_BKPT;
-    goto drop_pk_cleanup;
-  }
-  if( sParse.pNewTable==0 || !IsOrdinaryTable(sParse.pNewTable) ){
-    rc = SQLITE_CORRUPT_BKPT;
-    goto drop_pk_cleanup;
-  }
-  for(p=sParse.pLoc; p; p=p->pNext){
+  for(p=x.sParse.pLoc; p; p=p->pNext){
     if( p->eType==PARSELOC_PrimaryKey ) break;
   }
   if( p==0 ){
     /* The table has a PRIMARY KEY - the caller checked - but the stored
     ** text has no clause to remove it from. */
-    rc = SQLITE_CORRUPT_BKPT;
-    goto drop_pk_cleanup;
+    x.rc = SQLITE_CORRUPT_BKPT;
+    goto drop_pk_done;
   }
+  if( !alterEditCopy(&x) ) goto drop_pk_done;
 
-  nOut = sqlite3Strlen30(zSql);
-  zOut = sqlite3DbMallocRaw(db, (i64)nOut+1);
-  if( zOut==0 ){
-    rc = SQLITE_NOMEM_BKPT;
-    goto drop_pk_cleanup;
-  }
-  memcpy(zOut, zSql, (size_t)nOut+1);
-
-  nOut = alterExciseClause(zOut, nOut, zSql, &p->t);
-  sqlite3_result_text(ctx, zOut, nOut, SQLITE_TRANSIENT);
-
-drop_pk_cleanup:
-  renameParseCleanup(&sParse);
-  sqlite3DbFree(db, zOut);
+  x.nOut = alterExciseClause(x.zOut, x.nOut, x.zSql, &p->t);
+  sqlite3_result_text(ctx, x.zOut, x.nOut, SQLITE_TRANSIENT);
 
 drop_pk_done:
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  db->xAuth = xAuth;
-#endif
-  if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
-  }
+  alterEditFinish(&x, ctx);
 }
 
 /*
@@ -4147,66 +4143,40 @@ static void dropFkFunc(
   const char *zTo = (const char*)sqlite3_value_text(argv[2]);
   int nChild = sqlite3_value_int(argv[3]);
   int nParent;
-  const char *zDb;
   Table *pTab;
   FKey *pFKey;
   ParseLoc *pLoc;
-  Parse sParse;
-  char *zOut = 0;
-  int nOut = 0;
+  AlterEdit x;
   int nFound = 0;
   int nKey, nRec, i;
-  int rc;
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  sqlite3_xauth xAuth = db->xAuth;
-  db->xAuth = 0;
-#endif
 
-  if( zSql==0 || zTo==0 || iSchema<0 || iSchema>=db->nDb
-   || nChild<=0 || argc<4+nChild
-  ){
-    rc = SQLITE_OK;
-    goto drop_fk_done;
+  if( zTo==0 || nChild<=0 || argc<4+nChild ){
+    /* Not a request this function can act on. */
+    return;
   }
+  if( !alterEditBegin(&x, db, iSchema, zSql) ) goto drop_fk_done;
   nParent = argc - 4 - nChild;
-  zDb = db->aDb[iSchema].zDbSName;
-
-  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
-  if( rc!=SQLITE_OK ){
-    rc = SQLITE_CORRUPT_BKPT;
-    goto drop_fk_cleanup;
-  }
-  pTab = sParse.pNewTable;
-  if( pTab==0 || !IsOrdinaryTable(pTab) ){
-    rc = SQLITE_CORRUPT_BKPT;
-    goto drop_fk_cleanup;
-  }
+  pTab = x.pTab;
 
   /* The two lists must be the same length, or the pairing below is
   ** meaningless. */
   nKey = 0;
   for(pFKey=pTab->u.tab.pFKey; pFKey; pFKey=pFKey->pNextFrom) nKey++;
   nRec = 0;
-  for(pLoc=sParse.pLoc; pLoc; pLoc=pLoc->pNext){
+  for(pLoc=x.sParse.pLoc; pLoc; pLoc=pLoc->pNext){
     if( pLoc->eType==PARSELOC_ForeignKey ) nRec++;
   }
   if( nKey!=nRec ){
-    rc = SQLITE_CORRUPT_BKPT;
-    goto drop_fk_cleanup;
+    x.rc = SQLITE_CORRUPT_BKPT;
+    goto drop_fk_done;
   }
 
-  nOut = sqlite3Strlen30(zSql);
-  zOut = sqlite3DbMallocRaw(db, (i64)nOut+1);
-  if( zOut==0 ){
-    rc = SQLITE_NOMEM_BKPT;
-    goto drop_fk_cleanup;
-  }
-  memcpy(zOut, zSql, (size_t)nOut+1);
+  if( !alterEditCopy(&x) ) goto drop_fk_done;
 
   /* Walk the two lists together.  Both are in reverse order of appearance,
   ** so this also removes matches right to left, which keeps every extent
   ** not yet used addressing the same byte of zOut that it did in zSql. */
-  pLoc = sParse.pLoc;
+  pLoc = x.sParse.pLoc;
   for(pFKey=pTab->u.tab.pFKey; pFKey; pFKey=pFKey->pNextFrom){
     int bMatch;
     while( pLoc && pLoc->eType!=PARSELOC_ForeignKey ) pLoc = pLoc->pNext;
@@ -4244,7 +4214,7 @@ static void dropFkFunc(
     }
 
     if( bMatch ){
-      nOut = alterExciseClause(zOut, nOut, zSql, &pLoc->t);
+      x.nOut = alterExciseClause(x.zOut, x.nOut, x.zSql, &pLoc->t);
       nFound++;
     }
     pLoc = pLoc->pNext;
@@ -4252,22 +4222,12 @@ static void dropFkFunc(
 
   if( nFound==0 ){
     errorMPrintf(ctx, "table \"%s\" has no such FOREIGN KEY", pTab->zName);
-    rc = SQLITE_OK;
-    goto drop_fk_cleanup;
+    goto drop_fk_done;
   }
-  sqlite3_result_text(ctx, zOut, nOut, SQLITE_TRANSIENT);
-
-drop_fk_cleanup:
-  renameParseCleanup(&sParse);
-  sqlite3DbFree(db, zOut);
+  sqlite3_result_text(ctx, x.zOut, x.nOut, SQLITE_TRANSIENT);
 
 drop_fk_done:
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  db->xAuth = xAuth;
-#endif
-  if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
-  }
+  alterEditFinish(&x, ctx);
 }
 
 /*
@@ -4456,55 +4416,32 @@ static void unsetStrictFunc(
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   int iSchema = sqlite3_value_int(argv[0]);
   const char *zSql = (const char*)sqlite3_value_text(argv[1]);
-  const char *zDb;
-  Table *pTab;
-  Parse sParse;
+  AlterEdit x;
   char *zNew;
   int nKeep;
-  int rc;
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  sqlite3_xauth xAuth = db->xAuth;
-  db->xAuth = 0;
-#endif
 
   UNUSED_PARAMETER(NotUsed);
-  if( zSql==0 || iSchema<0 || iSchema>=db->nDb ){
-    rc = SQLITE_OK;
+  if( !alterEditBegin(&x, db, iSchema, zSql) ) goto unset_strict_done;
+  if( x.sParse.sColListEnd.z==0 ){
+    /* This can happen if the sqlite_schema table is corrupt */
+    x.rc = SQLITE_CORRUPT_BKPT;
     goto unset_strict_done;
   }
-  zDb = db->aDb[iSchema].zDbSName;
 
-  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
-  if( rc!=SQLITE_OK ) goto unset_strict_cleanup;
-  pTab = sParse.pNewTable;
-  if( pTab==0 || !IsOrdinaryTable(pTab) || sParse.sColListEnd.z==0 ){
-    /* This can happen if the sqlite_schema table is corrupt */
-    rc = SQLITE_CORRUPT_BKPT;
-    goto unset_strict_cleanup;
-  }
-
-  nKeep = (int)(&sParse.sColListEnd.z[sParse.sColListEnd.n] - zSql);
+  nKeep = (int)(&x.sParse.sColListEnd.z[x.sParse.sColListEnd.n] - zSql);
   assert( nKeep>0 && nKeep<=sqlite3Strlen30(zSql) );
   zNew = sqlite3MPrintf(db, "%.*s%s", nKeep, zSql,
-      (pTab->tabFlags & TF_WithoutRowid)!=0 ? " WITHOUT ROWID" : ""
+      (x.pTab->tabFlags & TF_WithoutRowid)!=0 ? " WITHOUT ROWID" : ""
   );
   if( zNew==0 ){
-    rc = SQLITE_NOMEM_BKPT;
-    goto unset_strict_cleanup;
+    x.rc = SQLITE_NOMEM_BKPT;
+    goto unset_strict_done;
   }
   sqlite3_result_text(ctx, zNew, -1, SQLITE_TRANSIENT);
   sqlite3DbFree(db, zNew);
 
-unset_strict_cleanup:
-  renameParseCleanup(&sParse);
-
 unset_strict_done:
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  db->xAuth = xAuth;
-#endif
-  if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
-  }
+  alterEditFinish(&x, ctx);
 }
 
 /*
@@ -5470,49 +5407,29 @@ static void setColTypeFunc(
   const char *zSql = (const char*)sqlite3_value_text(argv[1]);
   const char *zCol = (const char*)sqlite3_value_text(argv[2]);
   const char *zType = (const char*)sqlite3_value_text(argv[3]);
-  const char *zDb;
   Table *pTab;
   ParseLoc *p;
-  Parse sParse;
-  char *zNew = 0;
+  AlterEdit x;
   char aOld, aNew;
   int iCol;
   int bInPk = 0;
-  int rc;
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  sqlite3_xauth xAuth = db->xAuth;
-  db->xAuth = 0;
-#endif
 
   UNUSED_PARAMETER(NotUsed);
-  if( zSql==0 || zCol==0 || zType==0 || iSchema<0 || iSchema>=db->nDb ){
-    rc = SQLITE_OK;
-    goto set_coltype_done;
-  }
-  zDb = db->aDb[iSchema].zDbSName;
+  if( zCol==0 || zType==0 ) return;
+  if( !alterEditBegin(&x, db, iSchema, zSql) ) goto set_coltype_done;
+  pTab = x.pTab;
 
-  rc = renameParseSql(&sParse, zDb, db, zSql, iSchema==1);
-  if( rc!=SQLITE_OK ){
-    rc = SQLITE_CORRUPT_BKPT;
-    goto set_coltype_cleanup;
-  }
-  pTab = sParse.pNewTable;
-  if( pTab==0 || !IsOrdinaryTable(pTab) ){
-    rc = SQLITE_CORRUPT_BKPT;
-    goto set_coltype_cleanup;
-  }
   iCol = alterColumnIndex(pTab, zCol);
   if( iCol<0 ){
     errorMPrintf(ctx, "no such column: %s", zCol);
-    rc = SQLITE_OK;
-    goto set_coltype_cleanup;
+    goto set_coltype_done;
   }
-  for(p=sParse.pLoc; p; p=p->pNext){
+  for(p=x.sParse.pLoc; p; p=p->pNext){
     if( p->eType==PARSELOC_ColType && p->iCol==iCol ) break;
   }
   if( p==0 ){
-    rc = SQLITE_CORRUPT_BKPT;
-    goto set_coltype_cleanup;
+    x.rc = SQLITE_CORRUPT_BKPT;
+    goto set_coltype_done;
   }
 
   aOld = pTab->aCol[iCol].affinity;
@@ -5521,8 +5438,7 @@ static void setColTypeFunc(
     errorMPrintf(ctx, "cannot change the type of column \"%s\" to \"%s\": "
                  "that changes its affinity, and the rows and index entries "
                  "already stored were written under the old one", zCol, zType);
-    rc = SQLITE_OK;
-    goto set_coltype_cleanup;
+    goto set_coltype_done;
   }
 
   /* Is this column part of the PRIMARY KEY?  If so, whether its type is
@@ -5552,29 +5468,21 @@ static void setColTypeFunc(
                    "\"%s\" to \"%s\": only a column declared exactly INTEGER "
                    "holds the rowid, so this moves where its values live",
                    zCol, zType);
-      rc = SQLITE_OK;
-      goto set_coltype_cleanup;
+      goto set_coltype_done;
     }
   }
 
-  zNew = alterRetypeText(db, iSchema, zSql, zCol, zType, 0);
-  if( zNew==0 ){
-    rc = SQLITE_NOMEM_BKPT;
-    goto set_coltype_cleanup;
+  /* Handed to the edit so that it is freed on the way out with everything
+  ** else this function borrowed. */
+  x.zOut = alterRetypeText(db, iSchema, zSql, zCol, zType, 0);
+  if( x.zOut==0 ){
+    x.rc = SQLITE_NOMEM_BKPT;
+    goto set_coltype_done;
   }
-  sqlite3_result_text(ctx, zNew, -1, SQLITE_TRANSIENT);
-
-set_coltype_cleanup:
-  renameParseCleanup(&sParse);
-  sqlite3DbFree(db, zNew);
+  sqlite3_result_text(ctx, x.zOut, -1, SQLITE_TRANSIENT);
 
 set_coltype_done:
-#ifndef SQLITE_OMIT_AUTHORIZATION
-  db->xAuth = xAuth;
-#endif
-  if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
-  }
+  alterEditFinish(&x, ctx);
 }
 
 /*

@@ -1,0 +1,53 @@
+# 2026 September 16
+#
+# The author disclaims copyright to this source code.  In place of
+# a legal notice, here is a blessing:
+#
+#    May you do good and not evil.
+#    May you find forgiveness for yourself and forgive others.
+#    May you share freely, never taking more than you give.
+#
+#*************************************************************************
+#
+# Injected-OOM coverage for the ALTER TABLE commands that edit a stored
+# CREATE TABLE statement by reparsing it.
+#
+# Each of them reparses the statement, allocates a working copy of it, and
+# builds a result - three allocations that can fail, at any point, leaving
+# a half-finished parse and a half-written buffer to release.  Every other
+# suite for these commands runs with allocation always succeeding, so none
+# of those paths were being taken.
+#
+# There is one case per editor.  The bodies are deliberately small: what is
+# under test is the failure path, not the edit, and a large statement only
+# multiplies the number of identical cases.
+#
+
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+source $testdir/malloc_common.tcl
+set testprefix altercons10
+
+foreach {tn setup alter} {
+  1 {CREATE TABLE t1(a DEFAULT 5, b);}        {ALTER TABLE t1 COLUMN a DROP DEFAULT}
+  2 {CREATE TABLE t1(a CHECK(a>0), b);}       {ALTER TABLE t1 COLUMN a DROP CHECK}
+  3 {CREATE TABLE t1(a, b, CHECK(a>0));}      {ALTER TABLE t1 DROP CHECK}
+  4 {CREATE TABLE t1(a, b, PRIMARY KEY(a));}  {ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY}
+  5 {CREATE TABLE p(k PRIMARY KEY);
+     CREATE TABLE t1(a, b REFERENCES p(k));}  {ALTER TABLE t1 DROP FOREIGN KEY(b) REFERENCES p(k)}
+  6 {CREATE TABLE t1(a VARCHAR(5), b);}       {ALTER TABLE t1 COLUMN a SET TYPE TEXT}
+  7 {CREATE TABLE t1(a, b);}                  {ALTER TABLE t1 COLUMN a ADD DEFAULT 9}
+  8 {CREATE TABLE t1(a INT, b INT);}          {ALTER TABLE t1 SET STRICT ON}
+  9 {CREATE TABLE t1(a INT, b INT) STRICT;}   {ALTER TABLE t1 SET STRICT OFF}
+} {
+  reset_db
+  db eval $setup
+  faultsim_save_and_close
+  do_faultsim_test $tn -prep {
+    faultsim_restore_and_reopen
+  } -body "db eval {$alter}" -test {
+    faultsim_test_result {0 {}}
+  }
+}
+
+finish_test
