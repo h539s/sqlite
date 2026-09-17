@@ -1557,10 +1557,8 @@ void sqlite3AddColumn(Parse *pParse, Token sName, Token sType){
   u8 eType = COLTYPE_CUSTOM;
   u8 szEst = 1;
   char affinity = SQLITE_AFF_BLOB;
-  const char *zColEnd = 0;  /* Where a constraint can be spliced into this
-                            ** column definition.  IN_RENAME_OBJECT only. */
-  const char *zTypeStart = 0;  /* First byte of the declared type, or the
-                            ** insertion point when none was written. */
+  const char *zColEnd = 0;
+  const char *zTypeStart = 0;
 
   if( (p = pParse->pNewTable)==0 ) return;
   if( p->nCol+1>db->aLimit[SQLITE_LIMIT_COLUMN] ){
@@ -1586,14 +1584,6 @@ void sqlite3AddColumn(Parse *pParse, Token sName, Token sType){
     }
   }
 
-  /* Remember where a constraint can be spliced into this column
-  ** definition: immediately after its type, or after its name when no type
-  ** was written.  Both are positions the parser hands over, so nothing has
-  ** to go looking for them in the text later - see ALTER TABLE ... ADD
-  ** CONSTRAINT <name> (<column>) DEFAULT.
-  **
-  ** This has to be taken before the two blocks below, either of which can
-  ** move sType.z or shorten sType.n, and before sName is dequoted. */
   if( IN_RENAME_OBJECT ){
     zColEnd = sType.n>0 ? &sType.z[sType.n] : &sName.z[sName.n];
     zTypeStart = sType.n>0 ? sType.z : zColEnd;
@@ -1670,9 +1660,6 @@ void sqlite3AddColumn(Parse *pParse, Token sName, Token sType){
   if( zColEnd ){
     assert( IN_RENAME_OBJECT );
     sqlite3ParseLocAdd(pParse, PARSELOC_ColDef, p->nCol-1, zColEnd, zColEnd);
-    /* And the extent of the declared type itself, for ALTER TABLE ...
-    ** SET TYPE.  Empty, and positioned where one would go, when the column
-    ** was written without a type. */
     sqlite3ParseLocAdd(pParse, PARSELOC_ColType, p->nCol-1, zTypeStart,
                        zColEnd);
   }
@@ -1689,9 +1676,9 @@ void sqlite3AddColumn(Parse *pParse, Token sName, Token sType){
 */
 void sqlite3AddNotNull(
   Parse *pParse,        /* Parsing context */
-  int onError,          /* OE_ code from the ON CONFLICT clause */
-  const char *zStart,   /* First byte of the "NOT" keyword */
-  const char *zEnd      /* First byte past the "NULL" keyword */
+  int onError,
+  const char *zStart,
+  const char *zEnd
 ){
   Table *p;
   Column *pCol;
@@ -1701,10 +1688,6 @@ void sqlite3AddNotNull(
   pCol->notNull = (u8)onError;
   p->tabFlags |= TF_HasNotNull;
 
-  /* Record where this constraint lives within the text being parsed, so
-  ** that ALTER TABLE ... DROP NOT NULL can excise it without having to
-  ** hunt for it with a lexical scan.  Only done for the reparse of a
-  ** stored CREATE TABLE statement - see renameParseSql().  */
   if( IN_RENAME_OBJECT ){
     sqlite3ConsLocAdd(pParse, PARSELOC_NotNull, p->nCol-1, zStart, zEnd);
   }
@@ -3095,13 +3078,6 @@ void sqlite3EndTable(
   if( !pSelect && IsOrdinaryTable(p) ){
     assert( pCons && pEnd );
 
-    /* Remember the ")" that closes the column and constraint list.  Two
-    ** ALTER TABLE edits are made relative to it: a new table-constraint goes
-    ** in just before it, and the table-option list - which the grammar puts
-    ** after it - is rewritten wholesale rather than hunting for one option
-    ** inside it.  Only useful while reparsing a stored statement, so it is
-    ** not worth a field in the Table object.  A CREATE TABLE ... AS SELECT
-    ** has no such token and is excluded above. */
     if( IN_RENAME_OBJECT ){
       pParse->sColListEnd = *pEnd;
     }
@@ -3751,7 +3727,7 @@ void sqlite3CreateForeignKey(
   Token *pTo,          /* Name of the other table */
   ExprList *pToCol,    /* Columns in the other table */
   int flags,           /* Conflict resolution algorithms. */
-  Token *pStart        /* First token of the clause, or 0 if not recording */
+  Token *pStart
 ){
   sqlite3 *db = pParse->db;
 #ifndef SQLITE_OMIT_FOREIGN_KEY
@@ -3864,10 +3840,6 @@ void sqlite3CreateForeignKey(
   p->u.tab.pFKey = pFKey;
   pFKey = 0;
 
-  /* Record where the clause sits, for ALTER TABLE ... DROP FOREIGN KEY.
-  ** Done here rather than in the grammar so that the recorded extents and
-  ** the FKey objects are created together: the editor pairs the two lists
-  ** off against each other, and both are built by prepending. */
   if( IN_RENAME_OBJECT && pStart!=0 ){
     sqlite3ConsLocAdd(pParse, PARSELOC_ForeignKey, -1,
                       pStart->z, &pStart->z[pStart->n]);
@@ -4730,16 +4702,7 @@ void sqlite3DefaultRowEst(Index *pIdx){
   if( IsUniqueIndex(pIdx) ) a[pIdx->nKeyCol] = 0;
 }
 
-/*
-** Generate code that removes index pIndex from schema iDb: its row in the
-** schema table, its entries in the stat tables, its b-tree, and its place
-** in the in-memory schema.
-**
-** Split out of sqlite3DropIndex() because ALTER TABLE needs the same code
-** for the automatic index that goes with a PRIMARY KEY - an index
-** sqlite3DropIndex() itself refuses to touch, since DROP INDEX may not be
-** used on one.
-*/
+/* Generate code that removes index pIndex of schema iDb, b-tree included. */
 void sqlite3CodeDropIndex(Parse *pParse, Index *pIndex, int iDb){
   sqlite3 *db = pParse->db;
   Vdbe *v = sqlite3GetVdbe(pParse);

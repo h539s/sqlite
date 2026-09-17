@@ -8344,32 +8344,11 @@ case OP_Vacuum: {
 #endif
 
 #ifndef SQLITE_OMIT_ALTERTABLE
-/* Opcode: AlterTabOpt P1 P2 P3 P4 *
-**
-** One phase of rebuilding table P4 in database P1 so that it gains (P2!=0)
-** or loses (P2==0) the WITHOUT ROWID option.  P3 selects the phase.
-**
-** The two forms use different b-tree structures, so this is a real rebuild
-** rather than a schema-text edit, and it is split around the DROP TABLE
-** that the altering statement generates for itself.  Phase 1 builds the
-** replacement table beside the original and copies the rows in.  The
-** generated DROP then removes the original.  Phase 2 gives the replacement
-** the original's name and rebuilds the indexes and triggers.
-**
-** Neither phase destroys a b-tree, which is what makes them legal here:
-** OP_Destroy refuses to run while another statement is reading, and the
-** statement that invoked this opcode is itself one.
-*/
+/* Opcode: AlterTabOpt P1 P2 P3 P4 * */
 case OP_AlterTabOpt: {
   assert( p->readOnly==0 );
   rc = sqlite3RunAlterTabOpt(&p->zErrMsg, db, pOp->p1,
                              (const AlterRebuild*)pOp->p4.z, pOp->p3);
-  /* Creating and dropping objects in the TEMP schema hard-expires every
-  ** prepared statement, this one included (see OP_SetCookie).  The schema
-  ** change is this statement's own doing and the bytecode that follows was
-  ** generated knowing about it, so un-expire ourselves the way
-  ** OP_ParseSchema does.  Without this, the OP_Destroy of the DROP TABLE
-  ** that separates the two phases would fail with SQLITE_ABORT_ROLLBACK. */
   p->expired = 0;
   if( rc ) goto abort_due_to_error;
   break;

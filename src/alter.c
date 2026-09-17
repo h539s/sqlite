@@ -734,56 +734,11 @@ struct RenameToken {
   RenameToken *pNext;    /* Next is a list of all RenameToken objects */
 };
 
-/*
-** Each ParseLoc object records where one piece of a CREATE TABLE statement
-** lives within the text being parsed.
-**
-** Where a RenameToken anchors on the identity of a parse-tree element, a
-** ParseLoc anchors on the ordinal of the column it belongs to.  It has to:
-** the things recorded here leave no addressable object behind for a
-** RenameToken to point at - a NOT NULL constraint becomes four bits in
-** Column.notNull, and the end of a column definition is not an object at
-** all.  A column index always exists.
-**
-** eType says what was recorded:
-**
-**   PARSELOC_NotNull   The extent of a NOT NULL constraint, taken in by
-**                      ALTER TABLE ... DROP NOT NULL.  A column can carry
-**                      more than one, so there can be several entries with
-**                      the same iCol.
-**
-**   PARSELOC_ColDef    An insertion point inside a column definition: the
-**                      first byte past the column's type, or past its name
-**                      when the type was omitted.  Anything spliced in
-**                      there becomes a constraint on that column.  Exactly
-**                      one entry per column.
-**
-**   PARSELOC_PrimaryKey
-**                      The extent of a PRIMARY KEY clause, taken in by
-**                      ALTER TABLE ... DROP CONSTRAINT PRIMARY KEY.  A
-**                      table has at most one, written either on a column
-**                      or on the table, so iCol is -1 for both forms and
-**                      the clause is found by kind.
-**
-**   PARSELOC_Default   The extent of a DEFAULT clause, taken in by
-**                      ALTER TABLE ... COLUMN <c> DROP DEFAULT.  A column
-**                      can carry more than one - SQLite lets the last win
-**                      - so there can be several entries with the same
-**                      iCol.
-**
-** Objects are only created while IN_RENAME_OBJECT, which means only during
-** the reparse of a stored schema statement performed by renameParseSql().
-** The extent t therefore always points into the same string that the
-** caller is about to edit.
-**
-** Created by sqlite3ParseLocAdd() and consumed by dropColConsFunc(),
-** dropPkFunc() and insertConstraintFunc(), all further down in this file.
-*/
 struct ParseLoc {
-  u8 eType;              /* One of the PARSELOC_* values */
-  int iCol;              /* Index of the column this belongs to */
-  Token t;               /* Extent of the recorded text */
-  ParseLoc *pNext;       /* Next location from the same parse */
+  u8 eType;
+  int iCol;
+  Token t;
+  ParseLoc *pNext;
 };
 
 /*
@@ -2494,13 +2449,7 @@ static int getWhitespace(const u8 *z){
 }
 
 
-/*
-** Trim trailing whitespace and comments from the extent that starts at
-** zStart and ends immediately before zEnd.  Return the trimmed length.
-**
-** Tokens tile the input exactly, and zEnd is always a token boundary, so
-** this never needs to look at a partial token.
-*/
+/* Length of zStart..zEnd with trailing whitespace and comments removed. */
 static int notNullRtrim(const char *zStart, const char *zEnd){
   int nMax = (int)(zEnd - zStart);
   int iOff = 0;
@@ -2516,28 +2465,13 @@ static int notNullRtrim(const char *zStart, const char *zEnd){
   return nRet;
 }
 
-/*
-** Record the location of a NOT NULL constraint on column iCol.  zStart
-** points at the "NOT" keyword and zEnd just past the "NULL" keyword.
-**
-** The constraint may extend past zEnd with an ON CONFLICT clause.  At the
-** point this is called Parse.sLastToken holds the parser's lookahead -
-** the first token after the whole constraint - so it bounds the extent
-** from above.  The bound is generous (it includes any intervening
-** whitespace and comments) and notNullRtrim() pulls it back to the last
-** real token.
-**
-** If the constraint is named, and the "CONSTRAINT <name>" clause is
-** separated from the "NOT" keyword by nothing but whitespace and
-** comments, then the name is part of this constraint and the extent is
-** widened to the left to take it in.
-*/
+/* Record a constraint's extent, taking in its CONSTRAINT name and lookahead. */
 void sqlite3ConsLocAdd(
-  Parse *pParse,        /* Parsing context */
-  u8 eType,             /* PARSELOC_NotNull, _PrimaryKey or _Default */
-  int iCol,             /* Column being constrained, or -1 */
-  const char *zStart,   /* First byte of the constraint keyword */
-  const char *zEnd      /* First byte past that keyword */
+  Parse *pParse,
+  u8 eType,
+  int iCol,
+  const char *zStart,
+  const char *zEnd
 ){
   const char *zKw;
   const char *zLimit;
@@ -2545,7 +2479,6 @@ void sqlite3ConsLocAdd(
   assert( pParse->isCreate );
   assert( zStart!=0 && zEnd!=0 && zEnd>zStart );
 
-  /* Widen to the left over an immediately preceding "CONSTRAINT <name>". */
   zKw = pParse->u1.cr.zConsKw;
   if( zKw!=0 ){
     const char *zGap = pParse->u1.cr.zConsEnd;
@@ -2557,10 +2490,6 @@ void sqlite3ConsLocAdd(
     }
   }
 
-  /* Extend to the right as far as the parser's lookahead allows, then pull
-  ** back to the last real token.  The clause can carry more than the two
-  ** keywords it starts with - a sort order, an ON CONFLICT, a column list -
-  ** and Parse.sLastToken is the first token after all of it. */
   zLimit = pParse->sLastToken.z;
   if( zLimit==0 || zLimit<zEnd ) zLimit = zEnd;
   zEnd = &zStart[notNullRtrim(zStart, zLimit)];
@@ -2568,17 +2497,7 @@ void sqlite3ConsLocAdd(
   sqlite3ParseLocAdd(pParse, eType, iCol, zStart, zEnd);
 }
 
-/*
-** Widen the recorded extent of the column being parsed so that it reaches
-** the end of the constraint just reduced.  Called once per column
-** constraint, so the last call for a column leaves the extent ending where
-** that column's definition ends - which is where ALTER TABLE splices a new
-** column-constraint in, and matches where one written by hand would go.
-**
-** Parse.sLastToken holds the parser's lookahead, the first token after the
-** constraint, so it bounds the extent from above; notNullRtrim() pulls it
-** back to the last real token.
-*/
+/* Extend the current column's extent over the constraint just parsed. */
 void sqlite3ColDefLocExtend(Parse *pParse){
   Table *p = pParse->pNewTable;
   ParseLoc *pLoc;
@@ -2595,29 +2514,7 @@ void sqlite3ColDefLocExtend(Parse *pParse){
   pLoc->t.n = (unsigned)notNullRtrim(pLoc->t.z, zLimit);
 }
 
-/*
-** Record where a column-constraint keyword sits, so that the ALTER TABLE
-** command that drops constraints of that kind can cut it out without
-** looking for it.
-**
-** pKw is the keyword that opens the clause.  sqlite3ConsLocAdd() takes in
-** everything that follows it up to the end of the last real token - a
-** DEFAULT's value however it was written, a CHECK's parenthesised
-** expression and the ON CONFLICT a table-level one may carry - and an
-** immediately preceding "CONSTRAINT <name>".
-**
-** bCol says which column the clause is recorded against: the one being
-** defined, or -1 for a constraint written at the end of the list.  Only
-** CHECK has the second form.  SQLite draws no distinction between the two
-** - pTab->pCheck is a flat list, a CHECK written on a column may refer to
-** any column of the table, and it is enforced exactly as a table-level one
-** is - so where it was written is the only thing that tells them apart,
-** and it is what DROP CHECK partitions them by.
-**
-** A DEFAULT always belongs to the column being defined, which is the last
-** one added so far.  The five grammar rules for DEFAULT all reduce while
-** that is still true.
-*/
+/* Record where a column-constraint keyword sits, for the ALTER that drops it. */
 void sqlite3ColConsLocAdd(Parse *pParse, u8 eType, Token *pKw, int bCol){
   Table *p = pParse->pNewTable;
   int iCol = -1;
@@ -2630,24 +2527,7 @@ void sqlite3ColConsLocAdd(Parse *pParse, u8 eType, Token *pKw, int bCol){
   sqlite3ConsLocAdd(pParse, eType, iCol, pKw->z, &pKw->z[pKw->n]);
 }
 
-/*
-** Extend the most recently recorded FOREIGN KEY extent to zEnd, so that a
-** column-level DEFERRABLE clause leaves with the key it belongs to.
-**
-** The table form carries its DEFERRABLE clause in the same grammar rule, so
-** the extent already covers it.  The column form does not: "a REFERENCES
-** p(x) DEFERRABLE INITIALLY DEFERRED" is two ccons, and the extent recorded
-** when the key was created stops at the end of the first.
-**
-** Left behind, that clause would not be inert.  SQLite applies a DEFERRABLE
-** clause to whichever key is the most recently created one, so after the
-** key it was written for is gone it would silently defer a different key.
-**
-** It is only this key's clause if it sits immediately after the extent, so
-** that is what is checked.  A DEFERRABLE written on a column that has no
-** REFERENCES of its own is somewhere else entirely, and the extent is left
-** as it was.
-*/
+/* Extend the newest FOREIGN KEY extent over a trailing DEFERRABLE clause. */
 void sqlite3FkLocExtend(Parse *pParse, const char *zEnd){
   ParseLoc *p;
   const char *z;
@@ -2668,20 +2548,13 @@ void sqlite3FkLocExtend(Parse *pParse, const char *zEnd){
   p->t.n = (unsigned)notNullRtrim(p->t.z, zEnd);
 }
 
-/*
-** Record one position within the text being parsed.  See the comment on
-** struct ParseLoc for what the eType values mean.  zEnd may equal zStart,
-** which records a bare position rather than an extent.
-**
-** Only ever called while IN_RENAME_OBJECT, so the recorded pointers are
-** into the stored statement that the caller is about to edit.
-*/
+/* Record one position within the text being parsed. */
 void sqlite3ParseLocAdd(
-  Parse *pParse,        /* Parsing context */
-  u8 eType,             /* PARSELOC_NotNull or PARSELOC_ColDef */
-  int iCol,             /* Index of the column this belongs to */
-  const char *zStart,   /* First byte of the extent */
-  const char *zEnd      /* First byte past the extent */
+  Parse *pParse,
+  u8 eType,
+  int iCol,
+  const char *zStart,
+  const char *zEnd
 ){
   ParseLoc *pNew;
 
@@ -2698,9 +2571,7 @@ void sqlite3ParseLocAdd(
   pParse->pLoc = pNew;
 }
 
-/*
-** Free a list of ParseLoc objects.
-*/
+/* Free a list of ParseLoc objects. */
 void sqlite3ParseLocFree(sqlite3 *db, ParseLoc *pLoc){
   while( pLoc ){
     ParseLoc *pNext = pLoc->pNext;
@@ -2710,7 +2581,7 @@ void sqlite3ParseLocFree(sqlite3 *db, ParseLoc *pLoc){
 }
 
 /*
-** Argument z points into the body of a constraint - specifically the
+** Argument z points into the body of a constraint - specifically the 
 ** second token of the constraint definition.  For a named constraint,
 ** z points to the second token of the constraint definition. For an 
 ** unnamed NOT NULL constraint, z points to the first byte past the NOT 
@@ -2968,14 +2839,7 @@ static void dropConstraintFunc(
 }
 
 
-/*
-** True if column iCol of pTab is part of the table's PRIMARY KEY, whether
-** as the rowid alias or as a column of the key's index.
-**
-** Asked by both sides of ALTER TABLE ... SET TYPE: whether a column is in
-** the key is what decides whether being declared exactly INTEGER moves its
-** values between the record and the rowid.
-*/
+/* True if column iCol is part of pTab's PRIMARY KEY. */
 static int alterColInPk(Table *pTab, int iCol){
   Index *pPk;
   int i;
@@ -2989,18 +2853,7 @@ static int alterColInPk(Table *pTab, int iCol){
   return 0;
 }
 
-/*
-** Find the column named zCol in pTab, which is a table as just reparsed out
-** of the text held in sqlite_schema.  Returns the column index, or -1.
-**
-** The editors are handed column names rather than column indexes on purpose.
-** An index would have to be resolved from the in-memory Table at prepare
-** time, and the in-memory Table is a cache of the stored text kept in step
-** by the schema cookie - a cookie that an edit to sqlite_schema under
-** writable_schema does not touch.  Resolving the name here, against the text
-** about to be edited, means a stale cache cannot send the edit to the wrong
-** column.
-*/
+/* Index of the column named zCol in pTab, or -1. */
 static int alterColumnIndex(Table *pTab, const char *zCol){
   int i;
   if( pTab==0 || zCol==0 ) return -1;
@@ -3010,30 +2863,12 @@ static int alterColumnIndex(Table *pTab, const char *zCol){
   return -1;
 }
 
-/*
-** Cut the clause whose extent is pLoc out of the statement held in zOut,
-** which is nOut bytes long and started life as a copy of zSql.  Return the
-** new length.
-**
-** The whitespace and comments on either side of the clause go with it.  If
-** what comes next closes the list or separates it, the neighbours can abut
-** - "a INT NOT NULL, b" becomes "a INT, b" and not "a INT , b" - and a
-** comma sitting in front of the clause belongs to it, so that removing a
-** table-constraint does not leave the list with a hole.  Otherwise exactly
-** one space is left behind to keep the neighbours apart.
-**
-** A comment in front of the clause is deliberately left alone.  It belongs
-** to whatever precedes it, not to the clause being removed.
-**
-** Offsets are taken relative to zSql rather than zOut so that a caller
-** removing several clauses can work right to left: every extent not yet
-** used still addresses the same byte of zOut that it addressed in zSql.
-*/
+/* Cut the clause at pLoc out of zOut and return the new length. */
 static int alterExciseClause(
-  char *zOut,             /* Statement being edited, in place */
-  int nOut,               /* Current length of zOut */
-  const char *zSql,       /* The original text the extents point into */
-  const Token *pLoc       /* Extent of the clause to remove */
+  char *zOut,
+  int nOut,
+  const char *zSql,
+  const Token *pLoc
 ){
   int iStart = (int)(pLoc->z - zSql);
   int iEnd = iStart + (int)pLoc->n;
@@ -3058,52 +2893,27 @@ static int alterExciseClause(
   return nOut - (iEnd - iStart);
 }
 
-/*
-** The state that every schema-text editor keeps while it works.
-**
-** Five of the internal SQL functions in this file edit a stored CREATE
-** TABLE by reparsing it, and all five open and close the same way.  They
-** open by taking (ISCHEMA, SQL), turning the authorizer off for the
-** duration, reparsing the statement, and checking that what came back is
-** an ordinary table.  They close by releasing that parse, freeing the
-** working copy and putting the authorizer back.  alterEditBegin() and
-** alterEditFinish() are those two ends.  What each function does in
-** between is its own business and stays in its own body.
-**
-** The authorizer is turned off because the reparse is not the user's
-** statement: it is this file re-reading a statement the user already ran.
-*/
 typedef struct AlterEdit AlterEdit;
 struct AlterEdit {
-  sqlite3 *db;            /* Database handle */
-  Parse sParse;           /* The reparsed CREATE TABLE */
-  Table *pTab;            /* sParse.pNewTable, once it has been checked */
-  const char *zSql;       /* The statement as stored */
-  char *zOut;             /* Working copy of zSql, or 0 */
-  int nOut;               /* Bytes of zOut in use */
-  int rc;                 /* Error to report, or SQLITE_OK */
-  int bParsed;            /* True once sParse needs releasing */
+  sqlite3 *db;
+  Parse sParse;
+  Table *pTab;
+  const char *zSql;
+  char *zOut;
+  int nOut;
+  int rc;
+  int bParsed;
 #ifndef SQLITE_OMIT_AUTHORIZATION
-  sqlite3_xauth xAuth;    /* Authorizer to put back */
+  sqlite3_xauth xAuth;
 #endif
 };
 
-/*
-** Open an edit of zSql, which belongs to schema iSchema.
-**
-** Return true if p->sParse and p->pTab are ready to be read.  Return false
-** if they are not, in which case the caller goes straight to
-** alterEditFinish(), which is safe either way.  A missing or out-of-range
-** argument is not an error - the statement is simply returned unchanged,
-** as these functions have always done - but a statement that does not
-** reparse into an ordinary table is SQLITE_CORRUPT: it is the definition
-** of the very table being altered.
-*/
+/* Open an edit of zSql: reparse it with the authorizer off. */
 static int alterEditBegin(
-  AlterEdit *p,           /* The edit to open */
-  sqlite3 *db,            /* Database handle */
-  int iSchema,            /* Schema the statement belongs to */
-  const char *zSql        /* The stored CREATE TABLE */
+  AlterEdit *p,
+  sqlite3 *db,
+  int iSchema,
+  const char *zSql
 ){
   memset(p, 0, sizeof(*p));
   p->db = db;
@@ -3132,11 +2942,7 @@ static int alterEditBegin(
   return 1;
 }
 
-/*
-** Give the edit a private copy of the statement to cut and splice.  The
-** callers that work by excising clauses need one; those that build the
-** result with sqlite3MPrintf() do not.  Returns true on success.
-*/
+/* Give the edit a private copy of the statement to cut and splice. */
 static int alterEditCopy(AlterEdit *p){
   assert( p->zOut==0 );
   p->nOut = sqlite3Strlen30(p->zSql);
@@ -3149,12 +2955,7 @@ static int alterEditCopy(AlterEdit *p){
   return 1;
 }
 
-/*
-** Close an edit opened by alterEditBegin(), whether or not it succeeded.
-**
-** The caller has already set the result it wants, if any; this only puts
-** back what was borrowed and reports the error, if there is one.
-*/
+/* Close an edit, giving back what it borrowed and reporting any error. */
 static void alterEditFinish(AlterEdit *p, sqlite3_context *ctx){
   if( p->bParsed ) renameParseCleanup(&p->sParse);
   sqlite3DbFree(p->db, p->zOut);
@@ -3164,34 +2965,7 @@ static void alterEditFinish(AlterEdit *p, sqlite3_context *ctx){
   if( p->rc!=SQLITE_OK ) sqlite3_result_error_code(ctx, p->rc);
 }
 
-/*
-** Internal SQL function:
-**
-**     sqlite_drop_colcons(ISCHEMA, SQL, ICOL, ETYPE)
-**
-** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
-** copy of that statement with every constraint of kind ETYPE - one of the
-** PARSELOC_* values - on column ICOL removed.  ICOL is the index the
-** command resolved at prepare time, against the live table; -1 asks for
-** the constraints written at table level, which only CHECK has.  If the
-** column carries no such constraint the
-** statement is returned unchanged, which follows postgres and matches what
-** the INTEGER form of sqlite_drop_constraint() does.
-**
-** The CHECK forms partition the table's CHECK constraints by where each
-** one was written: an ICOL of -1 takes those written after the column
-** list, any other takes those written inside that column's definition.
-** Neither reaches the other's, whatever the constraints happen to mention.
-**
-** This is the "technique C" counterpart of sqlite_drop_constraint().
-** Instead of scanning the text for the constraint, it reparses the
-** statement and reads the extents that sqlite3ConsLocAdd() recorded during
-** that parse.  Because the parser - not a heuristic scan - decides which
-** column each constraint belongs to, a column carrying more than one such
-** clause has all of them removed.  SQLite accepts both "a NOT NULL NOT
-** NULL" and "a DEFAULT 1 DEFAULT 2"; the scanning implementation removes
-** only the first, silently leaving the rest in force.
-*/
+/* sqlite_drop_colcons(ISCHEMA,SQL,ICOL,ETYPE): drop constraints of one kind. */
 static void dropColConsFunc(
   sqlite3_context *ctx,
   int NotUsed,
@@ -3205,9 +2979,6 @@ static void dropColConsFunc(
   AlterEdit x;
 
   UNUSED_PARAMETER(NotUsed);
-  /* ICOL is -1 for the clauses written at table level, which are the ones
-  ** recorded against no column.  Only CHECK has any; the other kinds were
-  ** given a column by the caller. */
   if( iCol<0 && eType!=PARSELOC_Check ) return;
   if( !alterEditBegin(&x, db, iSchema, zSql) ) goto drop_col_cons_done;
   if( iCol>=x.pTab->nCol ){
@@ -3217,11 +2988,6 @@ static void dropColConsFunc(
 
   if( !alterEditCopy(&x) ) goto drop_col_cons_done;
 
-  /* Excise the right-most constraint still to be removed, then repeat.
-  ** Working right to left means every offset not yet used still addresses
-  ** the same byte of zOut that it addressed in zSql.  Entries that have
-  ** been dealt with are marked by setting eType to 0 rather than being
-  ** unlinked, so that the list stays owned by sParse. */
   while( 1 ){
     ParseLoc *p;
     ParseLoc *pBest = 0;
@@ -3231,10 +2997,7 @@ static void dropColConsFunc(
       if( pBest==0 || p->t.z>pBest->t.z ) pBest = p;
     }
     if( pBest==0 ) break;
-    pBest->eType = 0;      /* Mark it done.  iCol cannot be used for this:
-                           ** -1 is a real value, meaning a table-level
-                           ** constraint, and is what the form that names
-                           ** no column matches on. */
+    pBest->eType = 0;
     x.nOut = alterExciseClause(x.zOut, x.nOut, x.zSql, &pBest->t);
   }
 
@@ -3244,26 +3007,7 @@ drop_col_cons_done:
   alterEditFinish(&x, ctx);
 }
 
-/*
-** Internal SQL function:
-**
-**     sqlite_insert_constraint(ISCHEMA, SQL, CONSTRAINT-TEXT, ICOL)
-**
-** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
-** copy of it with CONSTRAINT-TEXT spliced in.
-**
-** An ICOL of -1 adds a table-constraint: the text goes in just before the
-** ")" that closes the column and constraint list, introduced by a comma, so
-** it becomes the last constraint of the table.  Otherwise the text goes into
-** the definition of column ICOL, where it becomes a constraint on that
-** column.
-**
-** Neither position is found by searching.  The statement is reparsed and
-** both come from what the parser recorded during that parse:
-** Parse.sColListEnd for the closing ")", and the PARSELOC_ColDef entry for
-** the column, whose
-** extent ends where that column's definition does.  No text work is left.
-*/
+/* sqlite_insert_constraint(ISCHEMA,SQL,TEXT,ICOL): splice a constraint in. */
 static void insertConstraintFunc(
   sqlite3_context *ctx,
   int NotUsed,
@@ -3280,16 +3024,12 @@ static void insertConstraintFunc(
   UNUSED_PARAMETER(NotUsed);
   if( zCons==0 ) return;
   if( !alterEditBegin(&x, db, iSchema, zSql) ) goto insert_cons_done;
-  /* ICOL of -1 asks for a table-constraint. */
+
   if( iCol>=x.pTab->nCol ){
     x.rc = SQLITE_CORRUPT_BKPT;
     goto insert_cons_done;
   }
 
-  /* Where the text goes, and what introduces it.  A table-constraint goes
-  ** just before the ")" that closes the list and needs a comma of its own;
-  ** a column-constraint goes at the end of the column definition, where a
-  ** space is all that is wanted. */
   if( iCol<0 ){
     if( x.sParse.sColListEnd.z==0 ) goto insert_cons_corrupt;
     iOff = (int)(x.sParse.sColListEnd.z - zSql);
@@ -3398,23 +3138,12 @@ static Table *alterFindTable(
   return pTab;
 }
 
-/*
-** Emit the statement that puts an edited CREATE TABLE back in the schema.
-**
-** Every command in this file that edits schema text finishes the same way:
-** one UPDATE of the row holding pTab's CREATE statement, setting sql to
-** what an editor makes of it.  The editor call is the only part that
-** differs between them, and arrives here as a printf format and its
-** arguments.
-**
-** Keeping the UPDATE in one place keeps its WHERE clause in one place too.
-** A mistake there does not fail loudly: it edits the wrong row, or none.
-*/
+/* Emit the UPDATE that puts an edited CREATE TABLE back in the schema. */
 static void alterUpdateSchemaSql(
-  Parse *pParse,        /* Parse context */
-  Table *pTab,          /* Table whose stored statement is being edited */
-  const char *zDb,      /* Name of the schema holding it */
-  const char *zFmt,     /* The editor call, as a printf format */
+  Parse *pParse,
+  Table *pTab,
+  const char *zDb,
+  const char *zFmt,
   ...
 ){
   sqlite3 *db = pParse->db;
@@ -3424,7 +3153,7 @@ static void alterUpdateSchemaSql(
   va_start(ap, zFmt);
   zEdit = sqlite3VMPrintf(db, zFmt, ap);
   va_end(ap);
-  if( zEdit==0 ) return;   /* sqlite3VMPrintf() has already recorded the OOM */
+  if( zEdit==0 ) return;
 
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
@@ -3442,11 +3171,6 @@ static void alterUpdateSchemaSql(
 **  (2)   ALTER TABLE pSrc ALTER pCol DROP <kind>
 **
 ** One of pCons and pCol must be NULL and the other non-null.
-**
-** Form (1) drops a constraint the user named, whatever kind it is.  Form
-** (2) drops constraints of one kind off a named column, and eType says
-** which kind - one of the PARSELOC_* values, as sqlite_drop_colcons()
-** takes it.
 */
 void sqlite3AlterDropConstraint(
   Parse *pParse,     /* Parsing context */
@@ -3473,8 +3197,6 @@ void sqlite3AlterDropConstraint(
     sqlite3DbFree(db, z);
   }else{
     int iCol;
-    /* alterFindCol() authorizes the change, reports an unknown column, and
-    ** gives the editor the index to work with. */
     if( alterFindCol(pParse, pTab, pCol, &iCol) ) return;
     zArg = sqlite3MPrintf(db, "sqlite_drop_colcons(%d, sql, %d, %d)",
                           iDb, iCol, eType);
@@ -3566,8 +3288,7 @@ void sqlite3AlterSetNotNull(
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0, 2);
   if( !pTab ) return;
 
-  /* Find the column being altered.  alterFindCol() authorizes the change,
-  ** reports an unknown column, and gives the editors the index to use. */
+  /* Find the column being altered. */
   if( alterFindCol(pParse, pTab, pCol, &iCol) ){
     return;
   }
@@ -3590,9 +3311,7 @@ void sqlite3AlterSetNotNull(
       iDb, iDb, iCol, PARSELOC_NotNull, nCons, pCons, iCol
   );
 
-  /* Finally, reload the database schema.  This adds a constraint, so it
-  ** says so, even though the edit above drops any NOT NULL already there
-  ** before inserting the new one. */
+  /* Finally, reload the database schema. */
   renameReloadSchema(pParse, iDb, INITFLAG_AlterAddCons);
 }
 
@@ -3717,31 +3436,17 @@ void sqlite3AlterAddConstraint(
   renameReloadSchema(pParse, iDb, INITFLAG_AlterAddCons);
 }
 
-/*
-** Common tail shared by every ALTER TABLE ... ADD CONSTRAINT form.
-**
-** Reject a name another constraint on this table already carries, splice
-** zCons into the stored CREATE TABLE statement, and reload the schema.
-** A zCol of 0 stores it as a table-constraint; otherwise it becomes a
-** constraint on that column, named rather than numbered so that the editor
-** resolves it against the stored text.
-**
-** The text stored is the text the user wrote.  Nothing is regenerated from
-** the parse tree, so a constraint reads back the way it was typed.
-*/
+/* Reject a name already taken, splice zCons in, and reload the schema. */
 static void alterAddConstraintText(
-  Parse *pParse,        /* Parse context */
-  Table *pTab,          /* Table being altered */
-  int iDb,              /* Schema holding pTab */
-  const char *zDb,      /* Name of that schema */
-  const char *zName,    /* Name of the new constraint, or 0 if unnamed */
-  const char *zCons,    /* Text of the constraint to store */
-  int nCons,            /* Bytes of zCons to use */
-  int iCol              /* Column to attach it to, or -1 for the table */
+  Parse *pParse,
+  Table *pTab,
+  int iDb,
+  const char *zDb,
+  const char *zName,
+  const char *zCons,
+  int nCons,
+  int iCol
 ){
-  /* An unnamed constraint has no name to collide with, so there is nothing
-  ** to look for.  That is the DEFAULT case: it is reached by kind rather
-  ** than by name, so no name is asked for and none is stored. */
   if( zName ){
     sqlite3NestedParse(pParse,
         "SELECT sqlite_fail('constraint %q already exists', %d) "
@@ -3759,18 +3464,7 @@ static void alterAddConstraintText(
   renameReloadSchema(pParse, iDb, INITFLAG_AlterAddCons);
 }
 
-/*
-** Count the automatic indexes on pTab - the ones a PRIMARY KEY or UNIQUE
-** constraint in the table's own definition brought into being, as opposed
-** to the ones CREATE INDEX made.
-**
-** This is how the name of the index for a new UNIQUE or PRIMARY KEY
-** constraint is worked out ahead of time.  sqlite3CreateIndex() names an
-** automatic index "sqlite_autoindex_<table>_<n>" where n counts the indexes
-** already on the table.  When the edited statement is reparsed only the
-** automatic ones exist at that point, and the new constraint is last in the
-** list, so its n is this count plus one.
-*/
+/* Number of automatic indexes on pTab. */
 static int alterCountAutoIndex(Table *pTab){
   Index *pIdx;
   int n = 0;
@@ -3780,14 +3474,7 @@ static int alterCountAutoIndex(Table *pTab){
   return n;
 }
 
-/*
-** True if a PRIMARY KEY over pList would turn a column of pTab into an
-** alias for the rowid, which is the one form of PRIMARY KEY that changes
-** how rows are stored rather than adding an index beside them.  The test
-** mirrors the one in sqlite3AddPrimaryKey().
-**
-** If it would, *pzCol is set to the name of that column.
-*/
+/* True if a PRIMARY KEY over pList would make a column alias the rowid. */
 static int alterPkIsRowidAlias(Table *pTab, ExprList *pList, const char **pzCol){
   Expr *pExpr;
   int iCol;
@@ -3797,8 +3484,6 @@ static int alterPkIsRowidAlias(Table *pTab, ExprList *pList, const char **pzCol)
   if( pList->a[0].fg.sortFlags & KEYINFO_ORDER_DESC ) return 0;
   pExpr = sqlite3ExprSkipCollate(pList->a[0].pExpr);
   if( pExpr==0 ) return 0;
-  /* A quoted key column arrives as TK_STRING; sqlite3AddPrimaryKey() has
-  ** sqlite3StringToId() turn it into TK_ID before looking at it. */
   if( pExpr->op!=TK_ID && pExpr->op!=TK_STRING ) return 0;
   if( ExprHasProperty(pExpr, EP_IntValue) ) return 0;
   iCol = sqlite3ColumnIndex(pTab, pExpr->u.zToken);
@@ -3807,40 +3492,16 @@ static int alterPkIsRowidAlias(Table *pTab, ExprList *pList, const char **pzCol)
   return 1;
 }
 
-/*
-** Implement:
-**
-**     ALTER TABLE <table> ADD CONSTRAINT <name> UNIQUE(...)
-**     ALTER TABLE <table> ADD CONSTRAINT <name> PRIMARY KEY(...)
-**     ALTER TABLE <table> ADD CONSTRAINT <name> FOREIGN KEY(...) REFERENCES ...
-**
-** pFirst is the CONSTRAINT keyword; the constraint runs from there to the
-** end of the statement.  pList and zCols/nCols are the indexed column list,
-** as a parse tree and as text; both are 0 for a FOREIGN KEY.  Ownership of
-** pList passes to this routine.
-**
-** A UNIQUE or PRIMARY KEY constraint is not text alone: it needs the b-tree
-** of an automatic index to go with it.  That is built here by a nested
-** CREATE UNIQUE INDEX under the name the reparse will look for.  Building
-** it is also what vets the rows already in the table - if two of them
-** collide the index build fails and takes the whole statement with it.
-** Afterwards the index's own sql is set to NULL, which is how the schema
-** records an index that belongs to a constraint rather than to a CREATE
-** INDEX of its own.
-**
-** A FOREIGN KEY is text alone.  Its rows are checked only when foreign keys
-** are being enforced, which is the same rule that decides whether an INSERT
-** would check them.
-*/
+/* ALTER TABLE ADD CONSTRAINT <name> UNIQUE/PRIMARY KEY/FOREIGN KEY. */
 void sqlite3AlterAddNamedConstraint(
-  Parse *pParse,        /* Parse context */
-  SrcList *pSrc,        /* Table to add the constraint to */
-  Token *pFirst,        /* The CONSTRAINT keyword */
-  Token *pName,         /* Name of the new constraint */
-  int eType,            /* One of the ALTERCONS_* values */
-  ExprList *pList,      /* Indexed columns, or 0 for a FOREIGN KEY */
-  const char *zCols,    /* The same list as written, or 0 */
-  int nCols             /* Bytes of zCols */
+  Parse *pParse,
+  SrcList *pSrc,
+  Token *pFirst,
+  Token *pName,
+  int eType,
+  ExprList *pList,
+  const char *zCols,
+  int nCols
 ){
   sqlite3 *db = pParse->db;
   Table *pTab;
@@ -3864,9 +3525,6 @@ void sqlite3AlterAddNamedConstraint(
                       pTab->zName);
       goto add_named_cons_exit;
     }
-    /* An INTEGER PRIMARY KEY is the rowid rather than an index over it, so
-    ** adding one would have to rewrite every row.  Refuse rather than
-    ** quietly produce a table whose rowids do not match the column. */
     if( alterPkIsRowidAlias(pTab, pList, &zCol) ){
       sqlite3ErrorMsg(pParse,
           "cannot add an INTEGER PRIMARY KEY to table \"%s\": column \"%s\" "
@@ -3884,8 +3542,6 @@ void sqlite3AlterAddNamedConstraint(
   if( eType==ALTERCONS_ForeignKey ){
     alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, -1);
 
-    /* Emitted after the reload above, so that foreign_key_check sees the
-    ** key that was just added. */
     if( db->flags & SQLITE_ForeignKeys ){
       pParse->colNamesSet = 1;
       sqlite3NestedParse(pParse,
@@ -3899,11 +3555,6 @@ void sqlite3AlterAddNamedConstraint(
                                 pTab->zName, alterCountAutoIndex(pTab)+1);
     if( zIdx==0 ) goto add_named_cons_exit;
 
-    /* A PRIMARY KEY on a STRICT table implies NOT NULL on every column of
-    ** the key, which sqlite3EndTable() adds when the edited statement is
-    ** reparsed.  Nothing rechecks the rows at that point, so check them
-    ** here.  A rowid table that is not STRICT allows NULLs in a PRIMARY
-    ** KEY, so there is nothing to check for it. */
     if( eType==ALTERCONS_PrimaryKey && (pTab->tabFlags & TF_Strict)!=0 ){
       sqlite3NestedParse(pParse,
           "SELECT sqlite_fail('PRIMARY KEY %q on %q would be NULL', %d) "
@@ -3912,10 +3563,6 @@ void sqlite3AlterAddNamedConstraint(
       );
     }
 
-    /* Build the index.  This runs before the statement text is edited, so
-    ** it sees the table as it is now; the reparse afterwards finds the
-    ** b-tree already in place under the name it derives for the new
-    ** constraint. */
     sqlite3NestedParse(pParse,
         "CREATE UNIQUE INDEX \"%w\".\"%w\" ON \"%w\"(%.*s)",
         zDb, zIdx, pTab->zName, nCols, zCols
@@ -3935,26 +3582,14 @@ add_named_cons_exit:
   sqlite3DbFree(db, zName);
 }
 
-/*
-** Implement:
-**
-**     ALTER TABLE <table> COLUMN <column> ADD DEFAULT <value>
-**
-** DEFAULT is the one constraint this command understands that cannot be a
-** table-constraint, so this form names the column it belongs to.  pExpr
-** with zStart/zEnd is the default value as parsed and as written, the same
-** pair sqlite3AddDefaultValue() is handed in a CREATE TABLE.
-**
-** No row is touched.  A DEFAULT says what to store when an INSERT does not
-** mention the column, so rows already in the table are unaffected.
-*/
+/* ALTER TABLE COLUMN <c> ADD DEFAULT <value>. */
 void sqlite3AlterAddDefault(
-  Parse *pParse,        /* Parse context */
-  SrcList *pSrc,        /* Table to add the default to */
-  Token *pCol,          /* Name of the column it applies to */
-  Expr *pExpr,          /* The default value, as parsed */
-  const char *zStart,   /* First byte of the default value text */
-  const char *zEnd      /* First byte past the default value text */
+  Parse *pParse,
+  SrcList *pSrc,
+  Token *pCol,
+  Expr *pExpr,
+  const char *zStart,
+  const char *zEnd
 ){
   sqlite3 *db = pParse->db;
   Table *pTab;
@@ -3964,10 +3599,6 @@ void sqlite3AlterAddDefault(
   const char *zDb = 0;
   char *zCons = 0;
 
-  /* bAuth is 0 here, as in every other command that names a column:
-  ** alterFindCol() below raises the SQLITE_ALTER_TABLE callback with the
-  ** column name, and raising it twice for one statement would report the
-  ** same change to the authorizer as two. */
   assert( pSrc->nSrc==1 );
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0, 2);
   if( pTab==0 ) goto add_default_exit;
@@ -3983,9 +3614,6 @@ void sqlite3AlterAddDefault(
     sqlite3ErrorMsg(pParse, "cannot use DEFAULT on a generated column");
     goto add_default_exit;
   }
-  /* A column carries at most one DEFAULT.  The expression list is where a
-  ** GENERATED expression lives too, but a generated column was rejected
-  ** just above, so anything found here is a default value. */
   if( sqlite3ColumnExpr(pTab, pTabCol)!=0 ){
     sqlite3ErrorMsg(pParse, "column \"%s\" already has a default value",
                     pTabCol->zCnName);
@@ -3995,10 +3623,6 @@ void sqlite3AlterAddDefault(
   if( db->xAuth ) sqlite3FuncAuth(pParse, pExpr);
 #endif
 
-  /* The column is addressed to this command and is not part of what gets
-  ** stored, so the text is put together from the value rather than copied
-  ** whole.  There is no name: a DEFAULT is reached by kind, through
-  ** ALTER TABLE ... COLUMN <c> DROP DEFAULT. */
   zCons = sqlite3MPrintf(db, "DEFAULT %.*s", (int)(zEnd - zStart), zStart);
   if( zCons==0 ) goto add_default_exit;
 
@@ -4010,26 +3634,7 @@ add_default_exit:
   sqlite3DbFree(db, zCons);
 }
 
-/*
-** Internal SQL function:
-**
-**     sqlite_drop_pk(ISCHEMA, SQL)
-**
-** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
-** copy of it with the PRIMARY KEY clause removed.
-**
-** The clause is not searched for.  The statement is reparsed and the extent
-** recorded by sqlite3ConsLocAdd() during that parse says where it is, so
-** the column form ("a INT PRIMARY KEY DESC ON CONFLICT FAIL") and the table
-** form ("CONSTRAINT k PRIMARY KEY(a,b)") are handled by the same code, and
-** an ON CONFLICT clause or a sort order is taken in without being looked
-** for.
-**
-** A table-constraint has a comma in front of it that has to go with it, or
-** the list would be left with a hole.  Which comma - the one before or the
-** one after - is decided by what follows the clause, the same way
-** sqlite_drop_constraint() decides it.
-*/
+/* sqlite_drop_pk(ISCHEMA,SQL): remove the PRIMARY KEY clause. */
 static void dropPkFunc(
   sqlite3_context *ctx,
   int NotUsed,
@@ -4048,8 +3653,6 @@ static void dropPkFunc(
     if( p->eType==PARSELOC_PrimaryKey ) break;
   }
   if( p==0 ){
-    /* The table has a PRIMARY KEY - the caller checked - but the stored
-    ** text has no clause to remove it from. */
     x.rc = SQLITE_CORRUPT_BKPT;
     goto drop_pk_done;
   }
@@ -4062,11 +3665,7 @@ drop_pk_done:
   alterEditFinish(&x, ctx);
 }
 
-/*
-** Return the trailing number of an automatic index name, which is always
-** "sqlite_autoindex_<table>_<n>".  Returns 0 if the name is not of that
-** shape, which should not happen for an index the schema built itself.
-*/
+/* Trailing number of an automatic index name, or 0. */
 static int alterAutoIndexNumber(const char *zName){
   const char *z = zName ? strrchr(zName, '_') : 0;
   int n = 0;
@@ -4079,29 +3678,7 @@ static int alterAutoIndexNumber(const char *zName){
   return z[0]==0 ? n : 0;
 }
 
-/*
-** Internal SQL function:
-**
-**     sqlite_drop_fk(ISCHEMA, SQL, PARENT, NCHILD, <child...>, <parent...>)
-**
-** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
-** copy of it with every FOREIGN KEY matching the given shape removed: the
-** child columns are the NCHILD arguments after NCHILD, the parent table is
-** PARENT, and the parent columns are whatever arguments follow the child
-** ones - none of them if the key was written without a parent column list.
-**
-** A FOREIGN KEY need not have a name, so it is identified by what it says
-** rather than by what it is called.  Two keys may say the same thing; all
-** of them go.
-**
-** Pairing a key with its text:
-**
-**   Both lists are built by prepending - Table.u.tab.pFKey in
-**   sqlite3CreateForeignKey() and Parse.pLoc in sqlite3ParseLocAdd() - and
-**   the extent is recorded in the same statement that links the key, so the
-**   two run in the same order and pair off one for one.  If they somehow do
-**   not, the statement is refused rather than guessed at.
-*/
+/* sqlite_drop_fk(...): remove every FOREIGN KEY matching the given shape. */
 static void dropFkFunc(
   sqlite3_context *ctx,
   int argc,
@@ -4121,15 +3698,13 @@ static void dropFkFunc(
   int nKey, nRec, i;
 
   if( zTo==0 || nChild<=0 || argc<4+nChild ){
-    /* Not a request this function can act on. */
+
     return;
   }
   if( !alterEditBegin(&x, db, iSchema, zSql) ) goto drop_fk_done;
   nParent = argc - 4 - nChild;
   pTab = x.pTab;
 
-  /* The two lists must be the same length, or the pairing below is
-  ** meaningless. */
   nKey = 0;
   for(pFKey=pTab->u.tab.pFKey; pFKey; pFKey=pFKey->pNextFrom) nKey++;
   nRec = 0;
@@ -4143,9 +3718,6 @@ static void dropFkFunc(
 
   if( !alterEditCopy(&x) ) goto drop_fk_done;
 
-  /* Walk the two lists together.  Both are in reverse order of appearance,
-  ** so this also removes matches right to left, which keeps every extent
-  ** not yet used addressing the same byte of zOut that it did in zSql. */
   pLoc = x.sParse.pLoc;
   for(pFKey=pTab->u.tab.pFKey; pFKey; pFKey=pFKey->pNextFrom){
     int bMatch;
@@ -4163,8 +3735,6 @@ static void dropFkFunc(
         bMatch = 0;
       }
     }
-    /* The parent columns.  A request that named none matches only a key that
-    ** named none; otherwise the two lists have to agree name for name. */
     if( nParent!=0 && nParent!=nChild ) bMatch = 0;
     for(i=0; bMatch && i<nChild; i++){
       const char *zHave = pFKey->aCol[i].zCol;
@@ -4195,26 +3765,7 @@ drop_fk_done:
   alterEditFinish(&x, ctx);
 }
 
-/*
-** Implement "ALTER TABLE <table> DROP CONSTRAINT PRIMARY KEY".
-**
-** A PRIMARY KEY need not be named, so it is dropped by kind.  On a rowid
-** table an ordinary PRIMARY KEY is a constraint in the text plus an
-** automatic index beside the rows, and both have to go: leaving the index
-** behind would make the next schema load report an orphan index.  No row is
-** rewritten - the record layout of a rowid table does not depend on which
-** of its columns the PRIMARY KEY names.
-**
-** Two shapes are refused rather than half-done:
-**
-**   *  A WITHOUT ROWID table keeps its rows in PRIMARY KEY order, so the
-**      key is the table.  Dropping it would mean rebuilding.
-**
-**   *  An INTEGER PRIMARY KEY is the rowid.  Its values are not in the
-**      record at all - the record holds a NULL in that slot - so a table
-**      that lost the clause would read that column back as NULL for every
-**      row.  Rebuilding is the only way to keep the values.
-*/
+/* ALTER TABLE DROP CONSTRAINT PRIMARY KEY. */
 void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
   sqlite3 *db = pParse->db;
   Table *pTab;
@@ -4249,17 +3800,10 @@ void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
     return;
   }
 
-  /* Take the clause out of the stored statement. */
   alterUpdateSchemaSql(pParse, pTab, zDb, "sqlite_drop_pk(%d, sql)", iDb);
 
-  /* And take away the index that went with it. */
   sqlite3CodeDropIndex(pParse, pPk, iDb);
 
-  /* Automatic indexes are numbered by the order their constraints appear in
-  ** the CREATE TABLE, and the reparse will number them afresh.  Any that sat
-  ** after the PRIMARY KEY therefore move down one, and their rows have to be
-  ** renamed to match or the next schema load reports an orphan index.
-  ** Ascending order, so that each name is free by the time it is taken. */
   {
     int n = alterAutoIndexNumber(pPk->zName);
     while( n>0 ){
@@ -4281,28 +3825,7 @@ void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
 }
 
-/*
-** Internal SQL function:
-**
-**     sqlite_set_strict(ISCHEMA, SQL, BSEP)
-**
-** SQL is a CREATE TABLE statement.  Return a copy of it with the STRICT
-** table-option appended.  BSEP is true if the statement already carries a
-** table-option list (in practice, WITHOUT ROWID) and the new option has to
-** be introduced with a comma rather than with a space.
-**
-** The caller knows whether a separator is needed because it read
-** TF_WithoutRowid off the Table object.  Nothing here has to go looking
-** for it in the text.
-**
-** The only text work is deciding where the statement really ends.  The
-** stored SQL can carry trailing whitespace, and when the CREATE TABLE was
-** followed by a semicolon it can carry a trailing comment as well.
-** Appending after a "--" comment would bury the new option inside it, so
-** alterRtrimConstraint() is used to step back to the end of the last real
-** token.  It keeps block comments, which are terminated and so are safe to
-** append after.
-*/
+/* sqlite_set_strict(ISCHEMA,SQL,BSEP): append the STRICT table-option. */
 static void setStrictFunc(
   sqlite3_context *ctx,
   int NotUsed,
@@ -4316,10 +3839,6 @@ static void setStrictFunc(
   char *zNew;
 
   UNUSED_PARAMETER(NotUsed);
-  /* ISCHEMA is taken and checked so that every editor in this file is
-  ** called the same way, (ISCHEMA, SQL, ...).  This one has no use for it
-  ** beyond that: appending an option needs no reparse, so there is no
-  ** schema to reparse against. */
   if( zSql==0 || iSchema<0 || iSchema>=db->nDb ) return;
 
   nSql = alterRtrimConstraint(db, zSql, sqlite3Strlen30(zSql));
@@ -4337,30 +3856,7 @@ static void setStrictFunc(
   sqlite3_result_text(ctx, zNew, -1, SQLITE_DYNAMIC);
 }
 
-/*
-** Internal SQL function:
-**
-**     sqlite_unset_strict(ISCHEMA, SQL)
-**
-** SQL is a CREATE TABLE statement belonging to schema ISCHEMA that carries
-** the STRICT table-option.  Return a copy of it with STRICT removed.
-**
-** The option list is not searched for STRICT and edited in place.  It is
-** regenerated: everything from the ")" that closes the column list to the
-** end of the statement is replaced by the list the table should have once
-** STRICT is gone, which is " WITHOUT ROWID" or nothing at all.
-**
-** That keeps this indifferent to how the list was written - "STRICT",
-** "WITHOUT ROWID, STRICT", "STRICT , without rowid", a comment sitting
-** between the two - none of which a scan for the STRICT keyword would
-** handle without also working out which comma belongs to it.  The parser
-** already knows both facts this needs: where the list starts (just past
-** Parse.sColListEnd, recorded during the reparse) and which options the
-** table ends up with (TF_WithoutRowid).
-**
-** A comment written inside the option list is dropped along with the rest
-** of the list.  Comments anywhere else in the statement are untouched.
-*/
+/* sqlite_unset_strict(ISCHEMA,SQL): rebuild the option list without STRICT. */
 static void unsetStrictFunc(
   sqlite3_context *ctx,
   int NotUsed,
@@ -4375,15 +3871,13 @@ static void unsetStrictFunc(
   UNUSED_PARAMETER(NotUsed);
   if( !alterEditBegin(&x, db, iSchema, zSql) ) goto unset_strict_done;
   if( x.sParse.sColListEnd.z==0 ){
-    /* This can happen if the sqlite_schema table is corrupt */
+
     x.rc = SQLITE_CORRUPT_BKPT;
     goto unset_strict_done;
   }
 
   nKeep = (int)(&x.sParse.sColListEnd.z[x.sParse.sColListEnd.n] - zSql);
   assert( nKeep>0 && nKeep<=sqlite3Strlen30(zSql) );
-  /* Handed to the edit so that it is freed on the way out with everything
-  ** else this function borrowed. */
   x.zOut = sqlite3MPrintf(db, "%.*s%s", nKeep, zSql,
       (x.pTab->tabFlags & TF_WithoutRowid)!=0 ? " WITHOUT ROWID" : ""
   );
@@ -4397,13 +3891,7 @@ unset_strict_done:
   alterEditFinish(&x, ctx);
 }
 
-/*
-** Map the name of a table-option to the TF_ flag that represents it, or
-** return 0 if the name is not one this command understands.
-**
-** bWithout says the name was preceded by the WITHOUT keyword, which is how
-** a CREATE TABLE spells that option and therefore how this one does too.
-*/
+/* TF_ flag for a table-option name, or 0 if it is not one. */
 static u32 alterTableOptionCode(Token *pOpt, int bWithout){
   if( bWithout ){
     if( pOpt->n==5 && sqlite3_strnicmp(pOpt->z, "rowid", 5)==0 ){
@@ -4417,10 +3905,7 @@ static u32 alterTableOptionCode(Token *pOpt, int bWithout){
   return 0;
 }
 
-/*
-** Prepare and run one statement of dynamically built SQL.  Rows returned
-** are discarded.  On error, leave a message in *pzErrMsg.
-*/
+/* Prepare and run one statement, discarding any rows it returns. */
 static int alterExecSql(sqlite3 *db, char **pzErrMsg, const char *zSql){
   sqlite3_stmt *pStmt = 0;
   int rc;
@@ -4439,12 +3924,7 @@ static int alterExecSql(sqlite3 *db, char **pzErrMsg, const char *zSql){
   return rc;
 }
 
-/*
-** Run one SELECT that is expected to return a single text value, and
-** return a copy of it.  Returns NULL if there is no row.
-**
-** Takes ownership of zSql, which is freed before returning.
-*/
+/* Run a SELECT returning one text value and return a copy of it. */
 static char *alterQueryText(sqlite3 *db, int *pRc, char *zSql){
   sqlite3_stmt *pStmt = 0;
   char *zRet = 0;
@@ -4462,30 +3942,14 @@ static char *alterQueryText(sqlite3 *db, int *pRc, char *zSql){
   return zRet;
 }
 
-/*
-** Return a copy of the CREATE statement zSql with the name of the object
-** it creates qualified with schema zDb.  The caller frees the result.
-**
-** Nothing else can steer a nested CREATE into a schema other than "main".
-** sqlite3RunVacuum() gets away with setting db->init.iDb because VACUUM
-** also sets DBFLAG_Vacuum, which is what lets sqlite3TwoPartName() accept
-** that state; a rebuild has no such licence, so it names the schema in the
-** statement text instead.
-**
-** The text held in sqlite_schema is always a plain unqualified CREATE:
-** sqlite3EndTable(), sqlite3CreateIndex() and sqlite3BeginTrigger() each
-** normalise away both the TEMP keyword and any schema prefix the user
-** wrote.  So the name is simply the first token after TABLE, INDEX or
-** TRIGGER, skipping an IF NOT EXISTS if a complete one is present.  A
-** partial match is a name that happens to be spelled "if".
-*/
+/* Copy of a CREATE statement with the name it creates qualified by zDb. */
 static char *alterQualifyDdl(sqlite3 *db, const char *zDb, const char *zSql){
   static const u8 aPhrase[] = { TK_IF, TK_NOT, TK_EXISTS };
   const unsigned char *z = (const unsigned char*)zSql;
-  int i = 0;            /* Offset of the token being looked at */
-  int iName = -1;       /* Offset the schema prefix is inserted in front of */
-  int iIf = -1;         /* Offset of a partially matched IF NOT EXISTS */
-  int nMatch = 0;       /* 0 before TABLE/INDEX/TRIGGER, then 1 + phrase */
+  int i = 0;
+  int iName = -1;
+  int iIf = -1;
+  int nMatch = 0;
 
   while( z[i] ){
     int t;
@@ -4507,20 +3971,13 @@ static char *alterQualifyDdl(sqlite3 *db, const char *zDb, const char *zSql){
   return sqlite3MPrintf(db, "%.*s\"%w\".%s", iName, zSql, zDb, &zSql[iName]);
 }
 
-/*
-** Run zSql, which is expected to return one column of CREATE statements,
-** and append each one to the NULL-terminated array at *pazRedo, qualified
-** with schema zSchema.  *pnRedo is the number of entries already there and
-** is advanced past the ones added.
-**
-** Takes ownership of zSql, which is freed before returning.
-*/
+/* Append each CREATE statement zSql returns to *pazRedo, schema-qualified. */
 static int alterCollectDdl(
-  sqlite3 *db,          /* Database connection */
-  char ***pazRedo,      /* IN/OUT: the array being built */
-  int *pnRedo,          /* IN/OUT: number of entries in it */
-  const char *zSchema,  /* Schema the statements are to be run against */
-  char *zSql            /* The query to run */
+  sqlite3 *db,
+  char ***pazRedo,
+  int *pnRedo,
+  const char *zSchema,
+  char *zSql
 ){
   sqlite3_stmt *pStmt = 0;
   int rc;
@@ -4548,22 +4005,13 @@ static int alterCollectDdl(
   return rc;
 }
 
-/*
-** Return a copy of CREATE TABLE statement zSql with its table-option list
-** replaced by the one implied by tabFlags, and its table name replaced by
-** zNewName.  The caller frees the result.
-**
-** Neither edit is a search.  The option list is rebuilt from what follows
-** Parse.sColListEnd, on the same reasoning as sqlite_unset_strict().  The name
-** is located through its RenameToken, which is what sqlite_rename_table()
-** uses, so a quoted or awkwardly spelled name needs no special handling.
-*/
+/* Copy of zSql with its table-option list and its name rewritten. */
 static char *alterRewriteCreate(
-  sqlite3 *db,          /* Database connection */
-  int iDb,              /* Schema that zSql belongs to */
-  const char *zSql,     /* The CREATE TABLE statement to rewrite */
-  u32 tabFlags,         /* TF_WithoutRowid and/or TF_Strict, or 0 */
-  const char *zNewName  /* Rename the table to this, or NULL to keep it */
+  sqlite3 *db,
+  int iDb,
+  const char *zSql,
+  u32 tabFlags,
+  const char *zNewName
 ){
   Parse sParse;
   char *zNew = 0;
@@ -4583,9 +4031,9 @@ static char *alterRewriteCreate(
       int iName = (int)(pName->t.z - zSql);
       assert( iName>0 && iName + (int)pName->t.n <= nKeep );
       zNew = sqlite3MPrintf(db, "%.*s\"%w\"%.*s%s%s%s",
-          iName, zSql,                                   /* up to the name */
-          zNewName,                                      /* the new name */
-          nKeep - iName - (int)pName->t.n,               /* rest of the body */
+          iName, zSql,
+          zNewName,
+          nKeep - iName - (int)pName->t.n,
           &zSql[iName + pName->t.n],
           zWr, zSep, zSt);
     }
@@ -4594,18 +4042,12 @@ static char *alterRewriteCreate(
   return zNew;
 }
 
-/*
-** Return a copy of zSql with the extent pLoc - the declared type of some
-** column - replaced by zType.  The caller frees it.
-**
-** A column written without a type has an empty extent, positioned where a
-** type would go, and so needs a space in front of the new one.
-*/
+/* Copy of zSql with the declared type at pLoc replaced by zType. */
 static char *alterSpliceType(
-  sqlite3 *db,          /* Database connection */
-  const char *zSql,     /* The CREATE TABLE statement to rewrite */
-  const Token *pLoc,    /* Extent of the type being replaced */
-  const char *zType     /* The new declared type */
+  sqlite3 *db,
+  const char *zSql,
+  const Token *pLoc,
+  const char *zType
 ){
   int iStart = (int)(pLoc->z - zSql);
   int iEnd = iStart + (int)pLoc->n;
@@ -4614,27 +4056,14 @@ static char *alterSpliceType(
                         pLoc->n==0 ? " " : "", zType, &zSql[iEnd]);
 }
 
-/*
-** Return a copy of CREATE TABLE statement zSql with the declared type of
-** column zCol replaced by zType.  The caller frees it.  Returns 0 on
-** failure, having set *pzErr when the reason is worth reporting.
-**
-** This is only the edit.  Whether the edit is a safe thing to do on its
-** own is setColTypeFunc()'s question; when it is not, the caller is
-** rebuilding the table and the answer does not arise.
-**
-** The column is resolved against zSql, and the extent of the type it
-** currently declares comes from what the parser recorded during the
-** reparse, so a column written without a type needs no special case: its
-** extent is empty and sits where a type would go.
-*/
+/* Copy of zSql with column zCol's declared type replaced by zType. */
 static char *alterRetypeText(
-  sqlite3 *db,          /* Database connection */
-  int iDb,              /* Schema that zSql belongs to */
-  const char *zSql,     /* The CREATE TABLE statement to rewrite */
-  const char *zCol,     /* Column to retype */
-  const char *zType,    /* Its new declared type */
-  char **pzErr          /* OUT: error message, if any */
+  sqlite3 *db,
+  int iDb,
+  const char *zSql,
+  const char *zCol,
+  const char *zType,
+  char **pzErr
 ){
   Parse sParse;
   Table *pTab;
@@ -4664,45 +4093,21 @@ retype_out:
   return zNew;
 }
 
-/*
-** A rebuild plan: every statement OP_AlterTabOpt runs, worked out in full
-** at prepare time by alterCodeRebuild().
-**
-** The opcode executes what it is given and decides nothing.  That is only
-** possible because the pieces it would otherwise have to work out - the
-** stored CREATE TABLE text, and the DDL of the indexes and triggers the
-** DROP takes with it - are reachable by querying sqlite_schema, which
-** prepare time can do as readily as run time.  Anything changing the schema
-** between the two moves the schema cookie, which expires this statement and
-** forces a re-prepare, so a plan can never be executed against a schema it
-** was not derived from.
-**
-** Phase 1 uses zCreate and zCopy; phase 2 uses zRename, zRestore and
-** azRedo.  Each phase is handed a plan carrying only its own half.
-**
-** Handed to the opcode as P4 in a single allocation - the pointer array and
-** the strings live in the tail - so that P4_DYNAMIC frees the whole thing.
-*/
 struct AlterRebuild {
-  const char *zCreate;   /* CREATE TABLE that builds the replacement */
-  const char *zCopy;     /* INSERT INTO ... SELECT that fills it */
-  const char *zRename;   /* ALTER TABLE ... RENAME TO, putting the name back */
-  const char *zRestore;  /* UPDATE sqlite_schema, the intended spelling */
-  int nRedo;             /* Number of entries in azRedo */
-  const char **azRedo;   /* DDL of each index and trigger to put back */
+  const char *zCreate;
+  const char *zCopy;
+  const char *zRename;
+  const char *zRestore;
+  int nRedo;
+  const char **azRedo;
 };
 
-/*
-** Bytes one string occupies in a plan, terminator included.
-*/
+/* Bytes one string occupies in a plan, terminator included. */
 static i64 alterPlanLen(const char *z){
   return z ? (i64)sqlite3Strlen30(z)+1 : 0;
 }
 
-/*
-** Copy zVal into the plan's tail at *pz, advance *pz past it, and return
-** where it landed.  A zVal of 0 takes no room and returns 0.
-*/
+/* Copy zVal into the plan's tail at *pz and return where it landed. */
 static const char *alterPlanStr(char **pz, const char *zVal){
   i64 n = alterPlanLen(zVal);
   char *zRet;
@@ -4713,17 +4118,15 @@ static const char *alterPlanStr(char **pz, const char *zVal){
   return zRet;
 }
 
-/*
-** Package a plan for one phase.  Returns 0 on OOM.
-*/
+/* Package a rebuild plan for one phase.  Returns 0 on OOM. */
 static AlterRebuild *alterRebuildNew(
   sqlite3 *db,
   const char *zCreate,
   const char *zCopy,
   const char *zRename,
   const char *zRestore,
-  char **azRedo,        /* DDL to replay, or 0 */
-  int nRedo             /* Number of entries in azRedo */
+  char **azRedo,
+  int nRedo
 ){
   AlterRebuild *p;
   i64 nByte;
@@ -4748,19 +4151,13 @@ static AlterRebuild *alterRebuildNew(
   return p;
 }
 
-/*
-** Implement the OP_AlterTabOpt opcode: run one phase of the plan pReb.
-**
-** Nothing is worked out here.  See the comment on struct AlterRebuild for
-** why the whole plan can be, and is, settled at prepare time, and
-** alterSetWithoutRowid() for what the two phases are separated by.
-*/
+/* Implement OP_AlterTabOpt: run one phase of the plan pReb. */
 int sqlite3RunAlterTabOpt(
-  char **pzErrMsg,          /* OUT: error message */
-  sqlite3 *db,              /* Database connection */
-  int iDb,                  /* Schema holding the table */
-  const AlterRebuild *pReb, /* The plan for this phase */
-  int iPhase                /* 1 before the DROP, 2 after it */
+  char **pzErrMsg,
+  sqlite3 *db,
+  int iDb,
+  const AlterRebuild *pReb,
+  int iPhase
 ){
   u64 savedFlags;
   int rc;
@@ -4770,33 +4167,18 @@ int sqlite3RunAlterTabOpt(
   assert( iPhase==1 || iPhase==2 );
   UNUSED_PARAMETER(iDb);
 
-  /* This runs from inside an opcode, so the only b-trees whose mutexes are
-  ** held are the ones the statement itself declared it would touch.  The
-  ** statements below are prepared as they are run, and a prepare can reach
-  ** sqlite3ReadSchema(), which requires every schema's mutex - the main one
-  ** included, even when the table being rebuilt lives in temp.  Take them
-  ** all for the duration. */
   sqlite3BtreeEnterAll(db);
 
   if( iPhase==1 ){
-    /* Build the replacement beside the original and copy the rows in. */
+
     rc = alterExecSql(db, pzErrMsg, pReb->zCreate);
     if( rc==SQLITE_OK ) rc = alterExecSql(db, pzErrMsg, pReb->zCopy);
   }else{
-    /* The original is gone.  Give the replacement its name.
-    ** SQLITE_LegacyAlter keeps the rename from rewriting references in other
-    ** objects: those already name the table correctly, since the name is
-    ** being restored rather than changed. */
     savedFlags = db->flags;
     db->flags |= SQLITE_LegacyAlter;
     rc = alterExecSql(db, pzErrMsg, pReb->zRename);
     db->flags = savedFlags;
 
-    /* The rename wrote a correct but requoted statement; restore the
-    ** intended spelling, so that turning the option back off gives the text
-    ** the table started with.  Writing sqlite_schema directly needs
-    ** writable_schema, which in turn is ignored while defensive mode is
-    ** on. */
     if( rc==SQLITE_OK ){
       savedFlags = db->flags;
       db->flags |= SQLITE_WriteSchema;
@@ -4805,7 +4187,6 @@ int sqlite3RunAlterTabOpt(
       db->flags = savedFlags;
     }
 
-    /* And put the indexes and triggers back.  Already schema-qualified. */
     for(i=0; rc==SQLITE_OK && i<pReb->nRedo; i++){
       rc = alterExecSql(db, pzErrMsg, pReb->azRedo[i]);
     }
@@ -4815,21 +4196,13 @@ int sqlite3RunAlterTabOpt(
   return rc;
 }
 
-/*
-** Emit the nested SQL that looks for a row the table's new definition
-** rejects.  Run after the schema has been reloaded, so quick_check sees
-** the table as it now is.  Anything it reports aborts the statement, which
-** rolls the schema edit back with it.
-**
-** zOpt names the option in the error message and bOn says which way it was
-** moved, so the message reads "cannot set STRICT on t1: ...".
-*/
+/* Emit the check that looks for a row the new definition rejects. */
 static void alterCheckExistingRows(
-  Parse *pParse,        /* Parsing context */
-  Table *pTab,          /* The table that was altered */
-  const char *zDb,      /* Schema holding pTab */
-  const char *zOpt,     /* Name of the option, for the error message */
-  int bOn               /* True if the option was turned on */
+  Parse *pParse,
+  Table *pTab,
+  const char *zDb,
+  const char *zOpt,
+  int bOn
 ){
   pParse->colNamesSet = 1;
   sqlite3NestedParse(pParse,
@@ -4844,46 +4217,18 @@ static void alterCheckExistingRows(
   );
 }
 
-/*
-** Implement "ALTER TABLE pTab SET STRICT ON|OFF".
-**
-** Turning STRICT on has to hold up against three things:
-**
-**   (1) Every column must be declared with one of the standard datatypes.
-**       Checked here, before anything is written, so that the statement
-**       fails with the same message CREATE TABLE would have given.
-**
-**   (2) Every value already stored must match its column's declared type.
-**
-**   (3) Every column of a non-INTEGER PRIMARY KEY acquires an implied NOT
-**       NULL, so no such column may already hold a NULL.
-**
-** Turning it off is not simply the reverse.  It relaxes (1) and (3), but
-** it can still leave rows the new definition rejects, because an ANY
-** column has BLOB affinity while the table is strict and NUMERIC affinity
-** once it is not.  Text written into such a column while strict - '123',
-** say - is stored as text, and a NUMERIC column holding text that
-** converts losslessly to a number is precisely what quick_check reports
-** as "TEXT value in ...".  So the same check runs in both directions,
-** through alterCheckExistingRows().
-**
-** No row data is rewritten in either direction.  STRICT constrains what
-** may be written from here on; it does not change how existing rows are
-** stored.
-*/
+/* ALTER TABLE SET STRICT ON|OFF. */
 static void alterSetStrict(
-  Parse *pParse,        /* Parsing context */
-  Table *pTab,          /* The table being altered */
-  int iDb,              /* Index of the schema holding pTab */
-  const char *zDb,      /* Name of that schema */
-  int bOn               /* True to turn STRICT on */
+  Parse *pParse,
+  Table *pTab,
+  int iDb,
+  const char *zDb,
+  int bOn
 ){
   int ii;
 
   assert( IsOrdinaryTable(pTab) );
   if( bOn ){
-    /* Reject custom datatypes up front, before anything is written, so
-    ** that the message matches the one CREATE TABLE would have given. */
     for(ii=0; ii<pTab->nCol; ii++){
       Column *pCol = &pTab->aCol[ii];
       if( pCol->eCType==COLTYPE_CUSTOM ){
@@ -4903,7 +4248,6 @@ static void alterSetStrict(
 
   sqlite3MayAbort(pParse);
 
-  /* Edit the SQL for the named table. */
   if( bOn ){
     alterUpdateSchemaSql(pParse, pTab, zDb, "sqlite_set_strict(%d, sql, %d)",
                          iDb, (pTab->tabFlags & TF_WithoutRowid)!=0);
@@ -4915,52 +4259,31 @@ static void alterSetStrict(
   alterCheckExistingRows(pParse, pTab, zDb, "STRICT", bOn);
 }
 
-/*
-** Generate the three steps of a table rebuild, and work out in full, here,
-** every statement they will run.
-**
-** The work is the same whatever provoked it, so it lives here rather than
-** in each caller: build the replacement beside the original and copy the
-** rows in, drop the original, then give the replacement the original's name
-** and put its indexes and triggers back.  What the replacement is to be is
-** decided by the zCol/zType/eWrOp arguments, against the stored CREATE
-** TABLE text read below.
-**
-** Only the middle step may destroy a b-tree, and it has to be generated
-** here rather than run from inside the opcode: OP_Destroy refuses while
-** another statement is reading, and the statement that invokes an opcode is
-** itself one.  Generated into this statement, the reader count is one and
-** the drop is allowed, exactly as for a plain DROP TABLE.
-**
-** The DROP fires foreign key actions on any child row pointing at the
-** table, and PRAGMA foreign_keys cannot be turned off inside a
-** transaction, so that case is refused up front.  This is the same reason
-** the published twelve-step rebuild starts by disabling them.
-*/
+/* Generate the three steps of a table rebuild and the plan they run. */
 static void alterCodeRebuild(
-  Parse *pParse,        /* Parsing context */
-  Table *pTab,          /* The table to rebuild */
-  int iDb,              /* Schema holding it */
-  const char *zCol,     /* Column to retype, or 0 */
-  const char *zType,    /* Its new declared type, or 0 */
-  u8 eWrOp              /* 0 leave WITHOUT ROWID alone, 1 add, 2 remove */
+  Parse *pParse,
+  Table *pTab,
+  int iDb,
+  const char *zCol,
+  const char *zType,
+  u8 eWrOp
 ){
   sqlite3 *db = pParse->db;
   const char *zDb = db->aDb[iDb].zDbSName;
   AlterRebuild *pReb;
   SrcList *pDrop;
   Token tSchema, tName;
-  char *zName = 0;      /* The table's name, kept across the queries below */
-  char *zTmp = 0;       /* Name the replacement is built under */
-  char *zCols = 0;      /* Columns to carry across */
-  char *zOldSql = 0;    /* The stored CREATE TABLE */
-  char *zRetyped = 0;   /* zOldSql with the column retyped */
-  char *zFinal = 0;     /* What the table should end up stored under */
-  char *zCreate = 0;    /* The four statements of the plan */
+  char *zName = 0;
+  char *zTmp = 0;
+  char *zCols = 0;
+  char *zOldSql = 0;
+  char *zRetyped = 0;
+  char *zFinal = 0;
+  char *zCreate = 0;
   char *zCopy = 0;
   char *zRename = 0;
   char *zRestore = 0;
-  char **azRedo = 0;    /* DDL of each index and trigger on the table */
+  char **azRedo = 0;
   int nRedo = 0;
   u32 flags;
   int rc = SQLITE_OK;
@@ -4985,27 +4308,18 @@ static void alterCodeRebuild(
     }
   }
 
-  /* Everything wanted from the in-memory Table is taken now, before the
-  ** first nested query below.  A prepare can reload the schema, which would
-  ** leave pTab dangling; nothing after this point reads it. */
   zName = sqlite3DbStrDup(db, pTab->zName);
-  /* The name the replacement is built under until it takes the
-  ** original's.  It must be free. */
   zTmp = sqlite3MPrintf(db, "altertab_%s", pTab->zName);
   if( eWrOp ){
     flags = (eWrOp==1 ? TF_WithoutRowid : 0) | (pTab->tabFlags & TF_Strict);
   }else{
     flags = pTab->tabFlags & (TF_WithoutRowid|TF_Strict);
   }
-  /* Generated columns are computed by the new table and must not be
-  ** copied. */
   for(i=0; i<pTab->nCol; i++){
     if( pTab->aCol[i].colFlags & COLFLAG_GENERATED ) continue;
     zCols = sqlite3MPrintf(db, "%z%s\"%w\"", zCols, zCols?",":"",
                            pTab->aCol[i].zCnName);
   }
-  /* Only an OOM gets here: a table always has at least one column that is
-  ** not generated, which sqlite3EndTable() enforces. */
   if( zName==0 || zTmp==0 || zCols==0 ) goto rebuild_exit;
 
   if( sqlite3FindTable(db, zTmp, zDb)!=0 ){
@@ -5014,8 +4328,6 @@ static void alterCodeRebuild(
     goto rebuild_exit;
   }
 
-  /* The stored CREATE TABLE text, which is what the replacement's
-  ** definition is derived from.  It is only reachable by asking for it. */
   zOldSql = alterQueryText(db, &rc, sqlite3MPrintf(db,
       "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
       " WHERE type='table' AND name=%Q COLLATE nocase", zDb, zName));
@@ -5026,22 +4338,12 @@ static void alterCodeRebuild(
     goto rebuild_exit;
   }
 
-  /* The DDL of every index and trigger on the table.  The DROP between the
-  ** two phases takes those objects with it, so their text is captured here
-  ** and replayed by phase 2.  Automatic indexes have a NULL sql and are
-  ** skipped: the new table makes its own. */
   rc = alterCollectDdl(db, &azRedo, &nRedo, zDb, sqlite3MPrintf(db,
       "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
       " WHERE tbl_name=%Q COLLATE nocase AND sql IS NOT NULL"
       " AND type IN ('index','trigger')", zDb, zName));
   if( rc!=SQLITE_OK ) goto rebuild_dberr;
 
-  /* A TEMP trigger on a table in another schema is recorded in
-  ** temp.sqlite_schema, so the query above does not see it, but the DROP
-  ** does take it down.  Collect those too - unless TEMP has a table of its
-  ** own by this name, in which case they belong to that one and the DROP
-  ** will leave them alone.  An index cannot be in a different schema from
-  ** its table, so only triggers can turn up here. */
   if( iDb!=1 && sqlite3FindTable(db, zName, db->aDb[1].zDbSName)==0 ){
     rc = alterCollectDdl(db, &azRedo, &nRedo, db->aDb[1].zDbSName,
       sqlite3MPrintf(db,
@@ -5051,8 +4353,6 @@ static void alterCodeRebuild(
     if( rc!=SQLITE_OK ) goto rebuild_dberr;
   }
 
-  /* Derive the replacement's definition, then spell out the four statements
-  ** the two phases will run. */
   if( zCol ){
     char *zErr = 0;
     zRetyped = alterRetypeText(db, iDb, zOldSql, zCol, zType, &zErr);
@@ -5088,7 +4388,6 @@ static void alterCodeRebuild(
       " WHERE type='table' AND name=%Q COLLATE nocase", zDb, zFinal, zName);
   if( zCopy==0 || zRename==0 || zRestore==0 ) goto rebuild_exit;
 
-  /* The plan is settled.  Emit the three steps. */
   v = sqlite3GetVdbe(pParse);
   if( v==0 ) goto rebuild_exit;
   sqlite3MayAbort(pParse);
@@ -5128,38 +4427,12 @@ rebuild_exit:
   sqlite3DbFree(db, zRestore);
 }
 
-/*
-** Implement "ALTER TABLE pTab SET WITHOUT ROWID ON|OFF".
-**
-** A rowid table and a WITHOUT ROWID table are different on disk, so unlike
-** STRICT this cannot be a schema-text edit.  The table has to be built
-** anew, and the work is split into three pieces because only one of them
-** is allowed to destroy a b-tree.
-**
-**   1. OP_AlterTabOpt phase 1 creates the replacement beside the original,
-**      under a derived name, from the stored CREATE TABLE text with the
-**      option list and the name rewritten.  Then it copies the rows in.
-**
-**   2. Ordinary generated DROP TABLE code removes the original.  This has
-**      to be generated here rather than run from inside the opcode:
-**      OP_Destroy refuses while another statement is reading, and the
-**      statement that invokes an opcode is itself one.  Generated into
-**      this statement, the reader count is one and the drop is allowed -
-**      exactly as for a plain DROP TABLE.
-**
-**   3. OP_AlterTabOpt phase 2 renames the replacement into place and
-**      rebuilds the indexes and triggers that went with the original.
-**
-** The DROP fires foreign key actions on any child row pointing at the
-** table, and PRAGMA foreign_keys cannot be turned off inside a
-** transaction, so that case is refused up front instead.  This is the same
-** reason the published twelve-step rebuild starts by disabling them.
-*/
+/* ALTER TABLE SET WITHOUT ROWID ON|OFF. */
 static void alterSetWithoutRowid(
-  Parse *pParse,        /* Parsing context */
-  Table *pTab,          /* The table being altered */
-  int iDb,              /* Index of the schema holding pTab */
-  int bOn               /* True to turn WITHOUT ROWID on */
+  Parse *pParse,
+  Table *pTab,
+  int iDb,
+  int bOn
 ){
   assert( IsOrdinaryTable(pTab) );
 
@@ -5178,21 +4451,13 @@ static void alterSetWithoutRowid(
   alterCodeRebuild(pParse, pTab, iDb, 0, 0, bOn ? 1 : 2);
 }
 
-/*
-** Generate bytecode to implement:
-**
-**    ALTER TABLE pSrc SET <table-option> ON|OFF
-**
-** Validate the table and the option name, short-circuit when the option
-** already has the requested value, and hand off to the routine that knows
-** how to move that particular option.
-*/
+/* ALTER TABLE SET <table-option> ON|OFF. */
 void sqlite3AlterSetTableOption(
-  Parse *pParse,    /* Parsing context */
-  SrcList *pSrc,    /* The table being altered */
-  Token *pOpt,      /* Name of the table-option being set */
-  int bOn,          /* True to turn it on, false to turn it off */
-  int bWithout      /* True if WITHOUT preceded the name */
+  Parse *pParse,
+  SrcList *pSrc,
+  Token *pOpt,
+  int bOn,
+  int bWithout
 ){
   Table *pTab = 0;
   int iDb = 0;
@@ -5201,9 +4466,6 @@ void sqlite3AlterSetTableOption(
 
   assert( pSrc->nSrc==1 );
 
-  /* The grammar has already reported a right-hand side that is neither ON
-  ** nor OFF.  Return before looking the table up, so that a second and
-  ** less specific message does not replace that one. */
   if( bOn<0 ){
     sqlite3SrcListDelete(pParse->db, pSrc);
     return;
@@ -5223,7 +4485,6 @@ void sqlite3AlterSetTableOption(
     return;
   }
 
-  /* Setting the option to what it already is changes nothing. */
   if( ((pTab->tabFlags & optFlag)!=0)==(bOn!=0) ) return;
 
   if( optFlag==TF_Strict ){
@@ -5234,25 +4495,13 @@ void sqlite3AlterSetTableOption(
   }
 }
 
-/*
-** Implement "ALTER TABLE <table> DROP FOREIGN KEY(<cols>)
-**            REFERENCES <table>(<cols>)".
-**
-** A FOREIGN KEY need not have a name, so it is dropped by what it says.
-** The shape is handed to the editor as it was written and matched against
-** the stored statement there; nothing is resolved against the in-memory
-** schema, which is only asked whether the table can be altered at all.
-**
-** Dropping a foreign key can only relax the table, never break it, so no
-** row is examined and nothing is rebuilt.  The parent's own key and any
-** index behind it belong to the parent table and are left alone.
-*/
+/* ALTER TABLE DROP FOREIGN KEY(<cols>) REFERENCES <tab>(<cols>). */
 void sqlite3AlterDropForeignKey(
-  Parse *pParse,        /* Parsing context */
-  SrcList *pSrc,        /* The table being altered */
-  ExprList *pFromCol,   /* Columns of this table named by the key */
-  Token *pTo,           /* The parent table */
-  ExprList *pToCol      /* Columns of the parent, or 0 if none were given */
+  Parse *pParse,
+  SrcList *pSrc,
+  ExprList *pFromCol,
+  Token *pTo,
+  ExprList *pToCol
 ){
   sqlite3 *db = pParse->db;
   Table *pTab;
@@ -5270,9 +4519,6 @@ void sqlite3AlterDropForeignKey(
   zTo = sqlite3NameFromToken(db, pTo);
   if( zTo==0 ) goto drop_fk_exit;
 
-  /* Build the call one name at a time rather than packing the two lists
-  ** into strings: a column name can contain anything a quoted identifier
-  ** can, so there is no separator that would not need escaping. */
   zArg = sqlite3MPrintf(db, "sqlite_drop_fk(%d, sql, %Q, %d",
                         iDb, zTo, pFromCol->nExpr);
   for(i=0; zArg && i<pFromCol->nExpr; i++){
@@ -5296,14 +4542,7 @@ drop_fk_exit:
   sqlite3ExprListDelete(db, pToCol);
 }
 
-/*
-** Implement "ALTER TABLE <table> DROP CHECK", the form that names no
-** column.  The CHECKs written at table level go; those written inside a
-** column definition are the other form's business and are left alone.
-**
-** That form goes through sqlite3AlterDropConstraint() like the other
-** per-column editors; only the target differs.
-*/
+/* ALTER TABLE DROP CHECK, the form that names no column. */
 void sqlite3AlterDropCheck(Parse *pParse, SrcList *pSrc){
   Table *pTab;
   int iDb = 0;
@@ -5319,48 +4558,7 @@ void sqlite3AlterDropCheck(Parse *pParse, SrcList *pSrc){
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
 }
 
-/*
-** Internal SQL function:
-**
-**     sqlite_set_coltype(ISCHEMA, SQL, ICOL, TYPENAME)
-**
-** SQL is a CREATE TABLE statement belonging to schema ISCHEMA.  Return a
-** copy of it with the declared type of column ICOL replaced by
-** TYPENAME.  The extent of the type it currently declares comes from
-** what the parser recorded
-** during the reparse, so a column written without a type is handled by the
-** same code: its extent is empty and sits where a type would go.
-**
-** The change is refused unless it leaves the column's affinity alone.
-**
-** That is not caution, it is the difference between an edit and a rebuild.
-** A declared type is not just documentation: it fixes the column's
-** affinity, and affinity is applied when a value is written.  The rows
-** already in the table, and the keys already in every index over the
-** column, were written under the old one.  Changing it makes the file
-** disagree with its own schema:
-**
-**   *  PRAGMA integrity_check reports "TEXT value in t.a" once a TEXT
-**      column with an index is redeclared INTEGER;
-**   *  a lookup through that index stops finding the rows, because the
-**      key the query computes is no longer the key that was stored;
-**   *  a WITHOUT ROWID table fails integrity_check the same way, its rows
-**      being held in the index that its PRIMARY KEY defines.
-**
-** Putting that right means rewriting every row and rebuilding every index
-** - a table rebuild, which is out of reach of a text edit.  So the cases
-** that need one are refused rather than half-done, and what is left is
-** the change that only ever affected the declaration: one that keeps the
-** affinity, such as VARCHAR(20) to TEXT or INT to INTEGER.
-**
-** One such change is still refused.  Exactly the word INTEGER, on the
-** PRIMARY KEY of a rowid table, makes the column an alias for the rowid;
-** INT does not, though the two have the same affinity.  Crossing that
-** line either way changes where the values live: away from INTEGER they
-** would be read back as NULL, having never been in the record at all,
-** and towards it the table's automatic index becomes an orphan and the
-** schema will not load.
-*/
+/* sqlite_set_coltype(ISCHEMA,SQL,ICOL,TYPE): retype a column, affinity kept. */
 static void setColTypeFunc(
   sqlite3_context *ctx,
   int NotUsed,
@@ -5403,8 +4601,6 @@ static void setColTypeFunc(
     goto set_coltype_done;
   }
 
-  /* Is this column part of the PRIMARY KEY?  If so, whether its type is
-  ** exactly INTEGER decides where its values live. */
   if( alterColInPk(pTab, iCol) ){
     Token t;
     int bWasInt, bIsInt;
@@ -5423,9 +4619,6 @@ static void setColTypeFunc(
     }
   }
 
-  /* Handed to the edit so that it is freed on the way out with everything
-  ** else this function borrowed.  The extent found above is from this
-  ** function's own reparse, so the splice needs no second one. */
   x.zOut = alterSpliceType(db, zSql, &p->t, zType);
   if( x.zOut==0 ){
     x.rc = SQLITE_NOMEM_BKPT;
@@ -5437,33 +4630,7 @@ set_coltype_done:
   alterEditFinish(&x, ctx);
 }
 
-/*
-** Implement "ALTER TABLE <table> COLUMN <column> SET TYPE <type>".
-**
-** Any type may be asked for.  Which of two routes gets there depends on
-** whether the column's affinity moves.
-**
-** A declared type fixes the column's affinity, and affinity is applied
-** when a value is written.  The rows already in the table, and the keys
-** already in every index over the column, were written under the old one.
-** So when the affinity stays put - VARCHAR(20) to TEXT, INT to INTEGER -
-** nothing on disk is affected and the stored statement is simply edited.
-** When it moves, every row and every index entry has to be written again,
-** which is a rebuild.
-**
-** One affinity-preserving change is a rebuild too.  Exactly the word
-** INTEGER, on the PRIMARY KEY of a rowid table, makes the column an alias
-** for the rowid; INT does not, though the two share an affinity.  Crossing
-** that line moves the values between the record and the rowid, so they
-** have to be carried across rather than left where they are.
-**
-** The choice is made here, from the in-memory schema, and that is safe
-** because both routes are correct: the rebuild is right whatever the
-** affinity does, and the edit re-asks the question against the stored
-** statement and refuses if the answer differs there.  A stale cache can
-** therefore cost a needless rebuild or produce a refusal, never a wrong
-** result.
-*/
+/* ALTER TABLE COLUMN <c> SET TYPE <type>. */
 void sqlite3AlterSetColumnType(
   Parse *pParse,
   SrcList *pSrc,
@@ -5479,8 +4646,6 @@ void sqlite3AlterSetColumnType(
   char *zType = 0;
   int bRebuild;
 
-  /* bAuth is 0 for the same reason as in sqlite3AlterAddDefault(): the
-  ** callback is raised once, by alterFindCol(), with the column name. */
   assert( pSrc->nSrc==1 );
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0, 2);
   if( pTab==0 ) return;
@@ -5488,9 +4653,6 @@ void sqlite3AlterSetColumnType(
     sqlite3ErrorMsg(pParse, "no type given for column \"%T\"", pCol);
     return;
   }
-  /* alterFindCol() is what authorizes the change and reports an unknown
-  ** column.  The index it returns picks the route below; the editor still
-  ** resolves the name against the text it is about to edit. */
   if( alterFindCol(pParse, pTab, pCol, &iCol) ) return;
   zCol = sqlite3NameFromToken(db, pCol);
   zType = sqlite3DbStrNDup(db, pType->z, pType->n);
@@ -5498,8 +4660,6 @@ void sqlite3AlterSetColumnType(
 
   bRebuild = pTab->aCol[iCol].affinity!=sqlite3AffinityType(zType, 0);
   if( !bRebuild && (pTab->tabFlags & TF_WithoutRowid)==0 ){
-    /* Would the column start or stop being the rowid?  Only a column that
-    ** the PRIMARY KEY names can, so the question is asked of those only. */
     if( alterColInPk(pTab, iCol)
      && (pTab->iPKey==iCol)!=(sqlite3StrICmp(zType,"INTEGER")==0)
     ){

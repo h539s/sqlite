@@ -386,10 +386,6 @@ scantok(A) ::= . {
 // column name and column type in a CREATE TABLE statement.
 //
 carglist ::= carglist ccons.  {
-  /* Widen this column's recorded extent over the constraint just parsed, so
-  ** that it ends where the column definition does.  That is where ALTER
-  ** TABLE splices a new column-constraint in.  Recorded only during the
-  ** reparse of a stored statement - see renameParseSql(). */
   if( IN_RENAME_OBJECT ) sqlite3ColDefLocExtend(pParse);
 }
 carglist ::= .
@@ -399,8 +395,6 @@ ccons ::= CONSTRAINT(C) nm(X). {
   pParse->u1.cr.zConsKw = C.z;
   pParse->u1.cr.zConsEnd = &X.z[X.n];
 }
-// Each of these records where the clause sits, for ALTER TABLE ...
-// COLUMN <c> DROP DEFAULT.  Only during the reparse of a stored statement.
 ccons ::= DEFAULT(D) scantok(A) term(X). {
   sqlite3AddDefaultValue(pParse,X,A.z,&A.z[A.n]);
   if( IN_RENAME_OBJECT ) sqlite3ColConsLocAdd(pParse, PARSELOC_Default, &D, 1);
@@ -436,8 +430,6 @@ ccons ::= NOT(N) NULL(M) onconf(R).
                                  {sqlite3AddNotNull(pParse, R, N.z, &M.z[M.n]);}
 ccons ::= PRIMARY(P) KEY sortorder(Z) onconf(R) autoinc(I). {
   sqlite3AddPrimaryKey(pParse,0,R,I,Z);
-  /* Record where the clause sits, for ALTER TABLE ... DROP CONSTRAINT
-  ** PRIMARY KEY.  Only during the reparse of a stored statement. */
   if( IN_RENAME_OBJECT ){
     sqlite3ConsLocAdd(pParse, PARSELOC_PrimaryKey, -1, P.z, &P.z[P.n]);
   }
@@ -450,10 +442,6 @@ ccons ::= CHECK(C) LP(A) expr(X) RP(B). {
 }
 ccons ::= REFERENCES(F) nm(T) eidlist_opt(TA) refargs(R).
                              {sqlite3CreateForeignKey(pParse,0,&T,TA,R,&F);}
-// A column-level REFERENCES is followed by its DEFERRABLE clause, if any, as
-// a separate ccons.  Take it into the extent recorded for the key, so that
-// dropping the key does not leave the clause behind to attach itself to
-// whichever key is the most recent one at that point.
 ccons ::= defer_subclause(D).    {
   sqlite3DeferForeignKey(pParse,D);
   if( IN_RENAME_OBJECT ) sqlite3FkLocExtend(pParse, pParse->sLastToken.z);
@@ -506,8 +494,6 @@ tconscomma ::= .
 tcons ::= CONSTRAINT(C) nm(X).  {
   ASSERT_IS_CREATE;
   pParse->u1.cr.constraintName = X;
-  /* Same record as the column-constraint rule keeps, so that a clause which
-  ** is dropped takes its name with it. */
   pParse->u1.cr.zConsKw = C.z;
   pParse->u1.cr.zConsEnd = &X.z[X.n];
 }
@@ -1959,34 +1945,16 @@ cmd ::= ALTER TABLE fullname(X) RENAME kwcolumn_opt nm(Y) TO nm(Z). {
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT nm(Y). {
   sqlite3AlterDropConstraint(pParse, X, &Y, 0, 0);
 }
-// A PRIMARY KEY need not have a name, so it is dropped by kind rather than
-// by name.  PRIMARY is a reserved word, not an identifier fallback, so this
-// cannot collide with dropping a constraint that is named "primary": such a
-// name has to be quoted, and a quoted one is an ID.
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT PRIMARY KEY. {
   sqlite3AlterDropPrimaryKey(pParse, X);
 }
-// A DEFAULT belongs to one column rather than to the table, so the column
-// is named and the constraint is reached by kind.
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) DROP DEFAULT. {
   sqlite3AlterDropConstraint(pParse, X, 0, &Y, PARSELOC_Default);
 }
-// A FOREIGN KEY need not have a name either, so it is named by what it
-// says.  The parent column list is optional here for the same reason it is
-// optional in a CREATE TABLE: a key written without one refers to the
-// parent's primary key, and only such a key is matched by such a request.
-// FOREIGN is a reserved word, so this cannot be confused with DROP COLUMN.
 cmd ::= ALTER TABLE fullname(X) DROP FOREIGN KEY LP eidlist(F) RP
         REFERENCES nm(T) eidlist_opt(TA). {
   sqlite3AlterDropForeignKey(pParse, X, F, &T, TA);
 }
-// A CHECK need not have a name, and SQLite draws no distinction between one
-// written on a column and one written on the table - pTab->pCheck is a flat
-// list and a column-level CHECK may refer to any column.  Where it was
-// written is therefore all there is to go on, and the two forms partition
-// the constraints by exactly that: naming a column takes the ones inside
-// that column's definition, naming none takes the ones after the column
-// list.  Neither reaches the other's, whatever they mention.
 cmd ::= ALTER TABLE fullname(X) DROP CHECK. {
   sqlite3AlterDropCheck(pParse, X);
 }
@@ -2005,15 +1973,9 @@ cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(Y) nm(Z) CHECK LP(A) expr(E) RP(B
 cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) LP(A) expr(E) RP(B) onconf. {
   sqlite3AlterAddConstraint(pParse, X, &Y, 0, A.z+1, (B.z-A.z-1), E);
 }
-// Change a column's declared type.  Only a change that leaves the column's
-// affinity alone is allowed: affinity is what the stored rows and the index
-// keys were written under, so changing it would make them disagree with the
-// declaration - see sqlite_set_coltype().
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) SET TYPE typetoken(Z). {
   sqlite3AlterSetColumnType(pParse, X, &Y, &Z);
 }
-// The option is spelled as it is in a CREATE TABLE, so WITHOUT ROWID is
-// two words here as it is there, and the rules mirror table_option above.
 cmd ::= ALTER TABLE fullname(X) SET WITHOUT nm(Y) onoff(Z). {
   sqlite3AlterSetTableOption(pParse, X, &Y, Z, 1);
 }
@@ -2021,10 +1983,6 @@ cmd ::= ALTER TABLE fullname(X) SET nm(Y) onoff(Z). {
   sqlite3AlterSetTableOption(pParse, X, &Y, Z, 0);
 }
 
-// The right-hand side of "ALTER TABLE ... SET <option>".  ON is a
-// keyword so it arrives as its own terminal; OFF is not, so it arrives as
-// an identifier.  Accepting nm here also lets either word be quoted.
-//
 %type onoff {int}
 onoff(A) ::= ON.       {A = 1;}
 onoff(A) ::= nm(X). {
@@ -2040,20 +1998,6 @@ onoff(A) ::= nm(X). {
   }
 }
 
-// ALTER TABLE ... ADD CONSTRAINT <name> <constraint>
-//
-// Unlike CREATE TABLE, the name is required.  A constraint added this way
-// can only be taken off again by name, so one added without a name would be
-// there for good.
-//
-// Every form but DEFAULT adds a constraint to the table.  DEFAULT is not a
-// table-constraint in any dialect - it belongs to one column - so that form
-// names the column it applies to.  The parsed constraint is thrown away
-// after parsing: what gets stored is the text the user wrote, and it is
-// located, not searched for.  Parsing it here is what turns a malformed
-// constraint into a syntax error now rather than a schema that will not
-// reload later.
-//
 cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N)
         UNIQUE LP(A) sortlist(L) RP(B) onconf. {
   sqlite3AlterAddNamedConstraint(pParse, X, &K, &N, ALTERCONS_Unique,
@@ -2081,17 +2025,10 @@ cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N)
                                  0, 0, 0);
 }
 
-// A DEFAULT belongs to one column rather than to the table, so the column
-// is named up front and there is no constraint name to give.  These five
-// mirror the "ccons ::= DEFAULT ..." rules so that exactly the same
-// expressions are accepted here as in a CREATE TABLE, and each hands over
-// the same (expression, text extent) pair.
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(C) ADD DEFAULT scantok(A) term(E). {
   sqlite3AlterAddDefault(pParse, X, &C, E, A.z, &A.z[A.n]);
 }
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(C) ADD DEFAULT LP(A) expr(E) RP(Z). {
-  /* Unlike the CREATE TABLE rule this keeps the parentheses: the text is
-  ** stored as a constraint of its own, and "DEFAULT 2+3" does not parse. */
   sqlite3AlterAddDefault(pParse, X, &C, E, A.z, &Z.z[Z.n]);
 }
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(C) ADD

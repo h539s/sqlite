@@ -3999,8 +3999,8 @@ struct Parse {
       int regRowid;         /* Register holding rowid of CREATE TABLE entry */
       int regRoot;          /* Register holding root page for new objects */
       Token constraintName; /* Name of the constraint currently being parsed */
-      const char *zConsKw;  /* Start of the CONSTRAINT keyword for that name */
-      const char *zConsEnd; /* First byte past the end of constraintName */
+      const char *zConsKw;
+      const char *zConsEnd;
     } cr;
     struct {  /* These fields available to all other statements */
       Returning *pReturning; /* The RETURNING clause */
@@ -4048,14 +4048,8 @@ struct Parse {
   With *pWith;              /* Current WITH clause, or NULL */
 #ifndef SQLITE_OMIT_ALTERTABLE
   RenameToken *pRename;     /* Tokens subject to renaming by ALTER TABLE */
-  ParseLoc *pLoc;           /* Positions recorded from the text being parsed.
-                            ** Only collected when IN_RENAME_OBJECT. */
-  Token sColListEnd;        /* The ")" that closes the column and constraint
-                            ** list of a CREATE TABLE.  Two edits are made
-                            ** relative to it: a new table-constraint goes in
-                            ** just before it, and the table-option list is
-                            ** everything after it.  IN_RENAME_OBJECT only,
-                            ** and z==0 for a CREATE TABLE ... AS SELECT. */
+  ParseLoc *pLoc;
+  Token sColListEnd;
 #endif
 };
 
@@ -4316,9 +4310,9 @@ typedef struct {
 #define INITFLAG_AlterDrop     0x0002  /* Reparse after a DROP COLUMN */
 #define INITFLAG_AlterAdd      0x0003  /* Reparse after an ADD COLUMN */
 #define INITFLAG_AlterDropCons 0x0004  /* Reparse after a DROP CONSTRAINT */
-#define INITFLAG_AlterAddCons  0x0005  /* Reparse after an ADD CONSTRAINT */
-#define INITFLAG_AlterSetOpt   0x0006  /* Reparse after SET <table-option> */
-#define INITFLAG_AlterSetType  0x0007  /* Reparse after SET TYPE */
+#define INITFLAG_AlterAddCons  0x0005
+#define INITFLAG_AlterSetOpt   0x0006
+#define INITFLAG_AlterSetType  0x0007
 
 /* Tuning parameters are set using SQLITE_TESTCTRL_TUNE and are controlled
 ** on debug-builds of the CLI using ".testctrl tune ID VALUE".  Tuning
@@ -5627,7 +5621,6 @@ void sqlite3AlterAddNamedConstraint(Parse*,SrcList*,Token*,Token*,int,
                                     ExprList*,const char*,int);
 void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Expr*,
                             const char*,const char*);
-/* Allowed values for the eType parameter of sqlite3AlterAddNamedConstraint() */
 #define ALTERCONS_Unique      1
 #define ALTERCONS_PrimaryKey  2
 #define ALTERCONS_ForeignKey  3
@@ -5637,8 +5630,6 @@ void sqlite3ColDefLocExtend(Parse*);
 void sqlite3FkLocExtend(Parse*, const char*);
 void sqlite3ColConsLocAdd(Parse*, u8, Token*, int);
 void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
-/* Allowed values for the second argument to sqlite3ParseLocAdd().  See the
-** comment on struct ParseLoc in alter.c for what each one records. */
 #define PARSELOC_NotNull  1
 #define PARSELOC_ColDef   2
 #define PARSELOC_PrimaryKey 3
