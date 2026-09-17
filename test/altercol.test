@@ -575,7 +575,7 @@ do_execsql_test 13.1.4 {
 
 do_catchsql_test 13.1.5 {
   ALTER TABLE x1 RENAME COLUMN t TO ttt;
-} {1 {error in index x1i: no such column: j}}
+} {1 {malformed database schema (x1i) - no such column: j}}
 
 do_execsql_test 13.1.6 {
   PRAGMA writable_schema = ON;
@@ -585,7 +585,7 @@ do_execsql_test 13.1.6 {
 
 do_catchsql_test 13.1.7 {
   ALTER TABLE x1 RENAME COLUMN t TO ttt;
-} {1 {error in index x1i: }}
+} {1 {malformed database schema (x1i) - orphan index}}
 
 do_execsql_test 13.1.8 {
   PRAGMA writable_schema = ON;

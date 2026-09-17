@@ -396,7 +396,7 @@ foreach {tn alter} {
      WHERE name = 't1';
     PRAGMA writable_schema = 0;
   }
-  do_catchsql_test 9.$tn.1 $alter {1 {database disk image is malformed}}
+  do_catchsql_test 9.$tn.1 $alter {1 {malformed database schema (t1) - incomplete input}}
   do_execsql_test 9.$tn.2 {
     PRAGMA writable_schema = 1;
     SELECT sql FROM sqlite_schema WHERE type='table';

@@ -465,7 +465,7 @@ do_execsql_test 11.1.0 {
 }
 do_catchsql_test 11.1.1 {
   ALTER TABLE t1 COLUMN a SET TYPE CLOB;
-} {1 {database disk image is malformed}}
+} {1 {malformed database schema (t1) - incomplete input}}
 do_execsql_test 11.1.2 {
   PRAGMA writable_schema = 1;
   SELECT sql FROM sqlite_schema WHERE type='table';

@@ -421,9 +421,9 @@ foreach {tn newsql alter res final} {
     {CREATE TABLE t1(a, b, CONSTRAINT k CHECK(a>0))}
 
   6 {CREATE TABLE t1(a, b)}
-    {ALTER TABLE t1 ADD CONSTRAINT k (a) DEFAULT 1}
+    {ALTER TABLE t1 COLUMN a ADD DEFAULT 1}
     {0 {}}
-    {CREATE TABLE t1(a CONSTRAINT k DEFAULT 1, b)}
+    {CREATE TABLE t1(a DEFAULT 1, b)}
 
   7 {CREATE TABLE t1(a, b, c)}
     {ALTER TABLE t1 ADD CONSTRAINT k CHECK(a>0)}
@@ -470,7 +470,7 @@ do_execsql_test 9.20.0 {
 }
 do_catchsql_test 9.20.1 {
   ALTER TABLE t1 ALTER c DROP NOT NULL;
-} {1 {database disk image is malformed}}
+} {1 {malformed database schema (t1) - incomplete input}}
 do_execsql_test 9.20.2 {
   PRAGMA writable_schema = 1;
   SELECT sql FROM sqlite_schema WHERE type='table';
@@ -487,30 +487,34 @@ do_execsql_test 9.21.0 {
   UPDATE sqlite_schema SET sql = 'CREATE TABLE t9(a, b, c)';
   PRAGMA writable_schema = 0;
 }
-do_test 9.21.1 {
-  list [catch { execsql {ALTER TABLE t1 ALTER c DROP NOT NULL} } msg] \
-       [string match {error in table t1 after drop constraint*} $msg]
-} {1 1}
+do_catchsql_test 9.21.1 {
+  ALTER TABLE t1 ALTER c DROP NOT NULL;
+} {1 {malformed database schema (t1)}}
 do_execsql_test 9.21.2 {
   PRAGMA writable_schema = 1;
   SELECT sql FROM sqlite_schema WHERE type='table';
 } {{CREATE TABLE t9(a, b, c)}}
 
-# 9.3.*: the message that reload failure produces names what the command
-# was doing, and a command that adds a constraint says "add constraint"
-# whichever of the two routines carried it out.  The mismatched name from
-# 9.21 is what makes the reload fail; only the wording is under test.
+# 9.30.*: every command refreshes the cache before it does anything, so a
+# stored statement that will not load stops all nine of them, and stops them
+# in the same way.  The row below is malformed because its name column and
+# its CREATE statement disagree.
 #
-foreach {tn alter word} {
-  1 {ALTER TABLE t1 ADD CHECK(a>0)}                 {add constraint}
-  2 {ALTER TABLE t1 ADD CONSTRAINT k CHECK(a>0)}    {add constraint}
-  3 {ALTER TABLE t1 ADD CONSTRAINT u UNIQUE(a)}     {add constraint}
-  4 {ALTER TABLE t1 ADD CONSTRAINT p PRIMARY KEY(a)} {add constraint}
-  5 {ALTER TABLE t1 COLUMN a ADD DEFAULT 1}         {add constraint}
-  6 {ALTER TABLE t1 ALTER a SET NOT NULL}           {add constraint}
-  7 {ALTER TABLE t1 ALTER c DROP NOT NULL}          {drop constraint}
-  8 {ALTER TABLE t1 COLUMN a DROP DEFAULT}          {drop constraint}
-  9 {ALTER TABLE t1 DROP CHECK}                     {drop constraint}
+# These cases used to pin the wording of the message the reload produces
+# after the edit - "error in table t1 after add constraint", and so on for
+# each command.  That message is no longer reached from here: the refresh
+# rejects this row up front, which is the point of it.
+#
+foreach {tn alter} {
+  1 {ALTER TABLE t1 ADD CHECK(a>0)}
+  2 {ALTER TABLE t1 ADD CONSTRAINT k CHECK(a>0)}
+  3 {ALTER TABLE t1 ADD CONSTRAINT u UNIQUE(a)}
+  4 {ALTER TABLE t1 ADD CONSTRAINT p PRIMARY KEY(a)}
+  5 {ALTER TABLE t1 COLUMN a ADD DEFAULT 1}
+  6 {ALTER TABLE t1 ALTER a SET NOT NULL}
+  7 {ALTER TABLE t1 ALTER c DROP NOT NULL}
+  8 {ALTER TABLE t1 COLUMN a DROP DEFAULT}
+  9 {ALTER TABLE t1 DROP CHECK}
 } {
   reset_db
   db eval {
@@ -519,10 +523,13 @@ foreach {tn alter word} {
     UPDATE sqlite_schema SET sql = 'CREATE TABLE t9(a, b, c)';
     PRAGMA writable_schema = 0;
   }
-  do_test 9.3.$tn {
-    catch { execsql $::alter } msg
-    string match "error in table t1 after $::word:*" $msg
-  } 1
+  do_catchsql_test 9.30.$tn $alter {1 {malformed database schema (t1)}}
+
+  # And the statement it refused to work from is left as it was.
+  do_execsql_test 9.30.$tn.1 {
+    PRAGMA writable_schema = 1;
+    SELECT sql FROM sqlite_schema WHERE type='table';
+  } {{CREATE TABLE t9(a, b, c)}}
 }
 
 finish_test
