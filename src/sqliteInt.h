@@ -1746,11 +1746,6 @@ struct sqlite3 {
   } init;
   int nVdbeActive;              /* Number of VDBEs currently running */
   int nVdbeRead;                /* Number of active VDBEs that read or write */
-#ifndef SQLITE_OMIT_ALTERTABLE
-  char **pAlterRedo;            /* NULL-terminated list of index and trigger
-                                ** DDL handed from phase 1 to phase 2 of an
-                                ** ALTER TABLE ... SET WITHOUT ROWID */
-#endif
   int nVdbeWrite;               /* Number of active VDBEs that read and write */
   int nVdbeExec;                /* Number of nested calls to VdbeExec() */
   int nVDestroy;                /* Number of active OP_VDestroy operations */
@@ -5584,7 +5579,6 @@ void sqlite3AlterFunctions(void);
 void sqlite3AlterRenameTable(Parse*, SrcList*, Token*);
 void sqlite3AlterRenameColumn(Parse*, SrcList*, Token*, Token*);
 void sqlite3AlterDropConstraint(Parse*,SrcList*,Token*,Token*,int);
-void sqlite3AlterRedoFree(sqlite3*);
 void sqlite3AlterAddConstraint(
   Parse *pParse,           /* Parse context */
   SrcList *pSrc,           /* Table to add constraint to */

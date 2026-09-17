@@ -81,6 +81,7 @@
 /testdir[0-9]*/
 /testrun_*/
 /testrunner.db
+/testrunner.db-*
 /testrunner.log
 /test.db
 /test.db-*

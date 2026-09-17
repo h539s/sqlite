@@ -4418,16 +4418,6 @@ static u32 alterTableOptionCode(Token *pOpt, int bWithout){
 }
 
 /*
-** The name the replacement table is built under while a rebuild is in
-** progress.  Derived from the table name so that both phases of the
-** rebuild agree on it without having to pass it between them.  Caller
-** frees the result.
-*/
-static char *alterRebuildName(sqlite3 *db, const char *zTab){
-  return sqlite3MPrintf(db, "altertab_%s", zTab);
-}
-
-/*
 ** Prepare and run one statement of dynamically built SQL.  Rows returned
 ** are discarded.  On error, leave a message in *pzErrMsg.
 */
@@ -4446,17 +4436,6 @@ static int alterExecSql(sqlite3 *db, char **pzErrMsg, const char *zSql){
   if( rc!=SQLITE_OK && *pzErrMsg==0 ){
     sqlite3SetString(pzErrMsg, db, sqlite3_errmsg(db));
   }
-  return rc;
-}
-static int alterExecSqlF(sqlite3 *db, char **pzErrMsg, const char *zFmt, ...){
-  char *z;
-  va_list ap;
-  int rc;
-  va_start(ap, zFmt);
-  z = sqlite3VMPrintf(db, zFmt, ap);
-  va_end(ap);
-  rc = alterExecSql(db, pzErrMsg, z);
-  sqlite3DbFree(db, z);
   return rc;
 }
 
@@ -4686,260 +4665,152 @@ retype_out:
 }
 
 /*
-** What a table is to be rebuilt as.  A rebuild is the same work whatever
-** provoked it - build the replacement beside the original, copy the rows,
-** drop the original, put the name and the dependent objects back - and the
-** only thing that varies is how the replacement's CREATE TABLE is derived
-** from the original's.  This says that, and nothing else.
+** A rebuild plan: every statement OP_AlterTabOpt runs, worked out in full
+** at prepare time by alterCodeRebuild().
 **
-** Handed to OP_AlterTabOpt as P4 in a single allocation, the strings living
-** in the tail, so that P4_DYNAMIC frees the whole thing.
+** The opcode executes what it is given and decides nothing.  That is only
+** possible because the pieces it would otherwise have to work out - the
+** stored CREATE TABLE text, and the DDL of the indexes and triggers the
+** DROP takes with it - are reachable by querying sqlite_schema, which
+** prepare time can do as readily as run time.  Anything changing the schema
+** between the two moves the schema cookie, which expires this statement and
+** forces a re-prepare, so a plan can never be executed against a schema it
+** was not derived from.
+**
+** Phase 1 uses zCreate and zCopy; phase 2 uses zRename, zRestore and
+** azRedo.  Each phase is handed a plan carrying only its own half.
+**
+** Handed to the opcode as P4 in a single allocation - the pointer array and
+** the strings live in the tail - so that P4_DYNAMIC frees the whole thing.
 */
 struct AlterRebuild {
-  const char *zTab;     /* The table being rebuilt */
-  const char *zCol;     /* SET TYPE: the column to retype, else 0 */
-  const char *zType;    /* SET TYPE: its new declared type, else 0 */
-  u8 eWrOp;             /* WITHOUT ROWID: 0 leave alone, 1 add, 2 remove */
+  const char *zCreate;   /* CREATE TABLE that builds the replacement */
+  const char *zCopy;     /* INSERT INTO ... SELECT that fills it */
+  const char *zRename;   /* ALTER TABLE ... RENAME TO, putting the name back */
+  const char *zRestore;  /* UPDATE sqlite_schema, the intended spelling */
+  int nRedo;             /* Number of entries in azRedo */
+  const char **azRedo;   /* DDL of each index and trigger to put back */
 };
 
 /*
-** Build one.  Returns 0 on OOM.
+** Bytes one string occupies in a plan, terminator included.
+*/
+static i64 alterPlanLen(const char *z){
+  return z ? (i64)sqlite3Strlen30(z)+1 : 0;
+}
+
+/*
+** Copy zVal into the plan's tail at *pz, advance *pz past it, and return
+** where it landed.  A zVal of 0 takes no room and returns 0.
+*/
+static const char *alterPlanStr(char **pz, const char *zVal){
+  i64 n = alterPlanLen(zVal);
+  char *zRet;
+  if( n==0 ) return 0;
+  zRet = *pz;
+  memcpy(zRet, zVal, (size_t)n);
+  *pz = &zRet[n];
+  return zRet;
+}
+
+/*
+** Package a plan for one phase.  Returns 0 on OOM.
 */
 static AlterRebuild *alterRebuildNew(
   sqlite3 *db,
-  const char *zTab,
-  const char *zCol,
-  const char *zType,
-  u8 eWrOp
+  const char *zCreate,
+  const char *zCopy,
+  const char *zRename,
+  const char *zRestore,
+  char **azRedo,        /* DDL to replay, or 0 */
+  int nRedo             /* Number of entries in azRedo */
 ){
   AlterRebuild *p;
-  i64 nTab = zTab ? sqlite3Strlen30(zTab)+1 : 0;
-  i64 nCol = zCol ? sqlite3Strlen30(zCol)+1 : 0;
-  i64 nType = zType ? sqlite3Strlen30(zType)+1 : 0;
+  i64 nByte;
   char *z;
+  int i;
 
-  p = sqlite3DbMallocZero(db, sizeof(*p) + nTab + nCol + nType);
+  nByte = sizeof(*p) + (i64)nRedo*sizeof(char*)
+        + alterPlanLen(zCreate) + alterPlanLen(zCopy)
+        + alterPlanLen(zRename) + alterPlanLen(zRestore);
+  for(i=0; i<nRedo; i++) nByte += alterPlanLen(azRedo[i]);
+
+  p = sqlite3DbMallocZero(db, nByte);
   if( p==0 ) return 0;
-  z = (char*)&p[1];
-  p->eWrOp = eWrOp;
-  if( zTab ){ memcpy(z, zTab, nTab); p->zTab = z; z += nTab; }
-  if( zCol ){ memcpy(z, zCol, nCol); p->zCol = z; z += nCol; }
-  if( zType ){ memcpy(z, zType, nType); p->zType = z; }
+  p->azRedo = (const char**)&p[1];
+  p->nRedo = nRedo;
+  z = (char*)&p->azRedo[nRedo];
+  p->zCreate  = alterPlanStr(&z, zCreate);
+  p->zCopy    = alterPlanStr(&z, zCopy);
+  p->zRename  = alterPlanStr(&z, zRename);
+  p->zRestore = alterPlanStr(&z, zRestore);
+  for(i=0; i<nRedo; i++) p->azRedo[i] = alterPlanStr(&z, azRedo[i]);
   return p;
 }
 
 /*
-** Free the hand-off left by phase 1 of a rebuild, if there is one.
-*/
-void sqlite3AlterRedoFree(sqlite3 *db){
-  char **az = db->pAlterRedo;
-  if( az ){
-    int i;
-    for(i=0; az[i]; i++) sqlite3DbFree(db, az[i]);
-    sqlite3DbFree(db, az);
-    db->pAlterRedo = 0;
-  }
-}
-
-/*
-** Implement the OP_AlterTabOpt opcode.  See the comment on that opcode for
-** how the work is split, and alterSetWithoutRowid() for what the two
-** phases are separated by.
+** Implement the OP_AlterTabOpt opcode: run one phase of the plan pReb.
+**
+** Nothing is worked out here.  See the comment on struct AlterRebuild for
+** why the whole plan can be, and is, settled at prepare time, and
+** alterSetWithoutRowid() for what the two phases are separated by.
 */
 int sqlite3RunAlterTabOpt(
   char **pzErrMsg,          /* OUT: error message */
   sqlite3 *db,              /* Database connection */
   int iDb,                  /* Schema holding the table */
-  const AlterRebuild *pReb, /* What to rebuild the table as */
+  const AlterRebuild *pReb, /* The plan for this phase */
   int iPhase                /* 1 before the DROP, 2 after it */
 ){
-  const char *zTab = pReb->zTab;
-  const char *zDb;
-  Table *pTab;
-  char *zTmp = 0;
-  char *zCols = 0;
-  char *zOldSql = 0;
-  char *zNewSql = 0;
-  char **azRedo = 0;    /* DDL of each index and trigger on the table */
-  int nRedo = 0;
   u64 savedFlags;
-  int rc = SQLITE_OK;
+  int rc;
   int i;
 
   assert( iDb>=0 && iDb<db->nDb );
   assert( iPhase==1 || iPhase==2 );
+  UNUSED_PARAMETER(iDb);
 
   /* This runs from inside an opcode, so the only b-trees whose mutexes are
   ** held are the ones the statement itself declared it would touch.  The
-  ** work below reparses stored CREATE TABLE statements, and a reparse can
-  ** reach sqlite3ReadSchema(), which requires every schema's mutex - the
-  ** main one included, even when the table being rebuilt lives in temp.
-  ** Take them all for the duration. */
+  ** statements below are prepared as they are run, and a prepare can reach
+  ** sqlite3ReadSchema(), which requires every schema's mutex - the main one
+  ** included, even when the table being rebuilt lives in temp.  Take them
+  ** all for the duration. */
   sqlite3BtreeEnterAll(db);
 
-  zDb = db->aDb[iDb].zDbSName;
-  zTmp = alterRebuildName(db, zTab);
-  if( zTmp==0 ){
-    rc = SQLITE_NOMEM_BKPT;
-    goto alter_tabopt_out;
-  }
-
-  if( iPhase==2 ){
-    /* The original is gone.  Give the replacement its name and put the
-    ** indexes and triggers back.  SQLITE_LegacyAlter keeps the rename from
-    ** rewriting references in other objects: those already name the table
-    ** correctly, since the name is being restored rather than changed. */
+  if( iPhase==1 ){
+    /* Build the replacement beside the original and copy the rows in. */
+    rc = alterExecSql(db, pzErrMsg, pReb->zCreate);
+    if( rc==SQLITE_OK ) rc = alterExecSql(db, pzErrMsg, pReb->zCopy);
+  }else{
+    /* The original is gone.  Give the replacement its name.
+    ** SQLITE_LegacyAlter keeps the rename from rewriting references in other
+    ** objects: those already name the table correctly, since the name is
+    ** being restored rather than changed. */
     savedFlags = db->flags;
     db->flags |= SQLITE_LegacyAlter;
-    rc = alterExecSqlF(db, pzErrMsg, "ALTER TABLE \"%w\".\"%w\" RENAME TO \"%w\"",
-                       zDb, zTmp, zTab);
+    rc = alterExecSql(db, pzErrMsg, pReb->zRename);
     db->flags = savedFlags;
 
-    if( db->pAlterRedo ){
-      char **az = db->pAlterRedo;
-
-      /* az[0] is the statement the table should be stored under.  The
-      ** rename above wrote a correct but requoted version of it; restore
-      ** the intended spelling so that turning the option back off gives
-      ** the text the table started with. */
-      if( rc==SQLITE_OK && az[0] ){
-        /* Writing sqlite_schema directly needs writable_schema, which in
-        ** turn is ignored while defensive mode is on. */
-        u64 f = db->flags;
-        db->flags |= SQLITE_WriteSchema;
-        db->flags &= ~(u64)SQLITE_Defensive;
-        rc = alterExecSqlF(db, pzErrMsg,
-            "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET sql=%Q"
-            " WHERE type='table' AND name=%Q COLLATE nocase",
-            zDb, az[0], zTab);
-        db->flags = f;
-      }
-      /* Already schema-qualified by alterCollectDdl(). */
-      for(i=1; rc==SQLITE_OK && az[i]; i++){
-        rc = alterExecSql(db, pzErrMsg, az[i]);
-      }
-      sqlite3AlterRedoFree(db);
-    }
-    goto alter_tabopt_out;
-  }
-
-  /* Phase 1.  Discard any hand-off left behind by a run that failed
-  ** between the two phases. */
-  sqlite3AlterRedoFree(db);
-  pTab = sqlite3FindTable(db, zTab, zDb);
-  if( pTab==0 || !IsOrdinaryTable(pTab) ){
-    rc = SQLITE_CORRUPT_BKPT;
-    goto alter_tabopt_out;
-  }
-
-  /* The columns to carry across.  Generated columns are computed by the
-  ** new table and must not be copied. */
-  for(i=0; i<pTab->nCol; i++){
-    if( pTab->aCol[i].colFlags & COLFLAG_GENERATED ) continue;
-    zCols = sqlite3MPrintf(db, "%z%s\"%w\"", zCols, zCols?",":"",
-                           pTab->aCol[i].zCnName);
-    if( zCols==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
-  }
-  if( zCols==0 ){ rc = SQLITE_CORRUPT_BKPT; goto alter_tabopt_out; }
-
-  /* The stored CREATE TABLE text, and the DDL of every index and trigger
-  ** on this table.  The DROP between the two phases takes those objects
-  ** with it, so their text has to be captured now.  Automatic indexes have
-  ** a NULL sql and are skipped: the new table makes its own. */
-  zOldSql = alterQueryText(db, &rc, sqlite3MPrintf(db,
-      "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
-      " WHERE type='table' AND name=%Q COLLATE nocase", zDb, zTab));
-  if( rc!=SQLITE_OK ) goto alter_tabopt_out;
-  if( zOldSql==0 ){ rc = SQLITE_CORRUPT_BKPT; goto alter_tabopt_out; }
-
-  /* Slot 0 of the hand-off carries the statement the table should end up
-  ** stored under; the rest carry the DDL to replay. */
-  azRedo = sqlite3DbMallocZero(db, 2*sizeof(char*));
-  if( azRedo==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
-  nRedo = 1;
-
-  rc = alterCollectDdl(db, &azRedo, &nRedo, zDb, sqlite3MPrintf(db,
-      "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
-      " WHERE tbl_name=%Q COLLATE nocase AND sql IS NOT NULL"
-      " AND type IN ('index','trigger')", zDb, zTab));
-  if( rc!=SQLITE_OK ) goto alter_tabopt_err;
-
-  /* A TEMP trigger on a table in another schema is recorded in
-  ** temp.sqlite_schema, so the query above does not see it, but the DROP
-  ** does take it down.  Collect those too - unless TEMP has a table of its
-  ** own by this name, in which case they belong to that one and the DROP
-  ** will leave them alone.  An index cannot be in a different schema from
-  ** its table, so only triggers can turn up here. */
-  if( iDb!=1 && sqlite3FindTable(db, zTab, db->aDb[1].zDbSName)==0 ){
-    rc = alterCollectDdl(db, &azRedo, &nRedo, db->aDb[1].zDbSName,
-      sqlite3MPrintf(db,
-        "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
-        " WHERE tbl_name=%Q COLLATE nocase AND sql IS NOT NULL"
-        " AND type='trigger'", db->aDb[1].zDbSName, zTab));
-    if( rc!=SQLITE_OK ) goto alter_tabopt_err;
-  }
-
-  /* Derive the replacement's definition.  The table options are rebuilt
-  ** from flags either way: the one being changed, if one is, and otherwise
-  ** the ones the table already carries. */
-  {
-    u32 flags;
-    char *zBase = zOldSql;
-    char *zRetyped = 0;
-    char *zTmpSql;
-
-    if( pReb->eWrOp ){
-      flags = (pReb->eWrOp==1 ? TF_WithoutRowid : 0)
-            | (pTab->tabFlags & TF_Strict);
-    }else{
-      flags = pTab->tabFlags & (TF_WithoutRowid|TF_Strict);
-    }
-    if( pReb->zCol ){
-      zRetyped = alterRetypeText(db, iDb, zOldSql, pReb->zCol, pReb->zType,
-                                 pzErrMsg);
-      if( zRetyped==0 ){
-        rc = *pzErrMsg ? SQLITE_ERROR : SQLITE_NOMEM_BKPT;
-        goto alter_tabopt_out;
-      }
-      zBase = zRetyped;
+    /* The rename wrote a correct but requoted statement; restore the
+    ** intended spelling, so that turning the option back off gives the text
+    ** the table started with.  Writing sqlite_schema directly needs
+    ** writable_schema, which in turn is ignored while defensive mode is
+    ** on. */
+    if( rc==SQLITE_OK ){
+      savedFlags = db->flags;
+      db->flags |= SQLITE_WriteSchema;
+      db->flags &= ~(u64)SQLITE_Defensive;
+      rc = alterExecSql(db, pzErrMsg, pReb->zRestore);
+      db->flags = savedFlags;
     }
 
-    zTmpSql = alterRewriteCreate(db, iDb, zBase, flags, zTmp);
-    if( zTmpSql ){
-      zNewSql = alterQualifyDdl(db, zDb, zTmpSql);
-      sqlite3DbFree(db, zTmpSql);
+    /* And put the indexes and triggers back.  Already schema-qualified. */
+    for(i=0; rc==SQLITE_OK && i<pReb->nRedo; i++){
+      rc = alterExecSql(db, pzErrMsg, pReb->azRedo[i]);
     }
-    if( zNewSql ) azRedo[0] = alterRewriteCreate(db, iDb, zBase, flags, 0);
-    sqlite3DbFree(db, zRetyped);
-    if( azRedo[0]==0 ){ rc = SQLITE_NOMEM_BKPT; goto alter_tabopt_out; }
   }
 
-  rc = alterExecSql(db, pzErrMsg, zNewSql);
-
-  if( rc==SQLITE_OK ){
-    rc = alterExecSqlF(db, pzErrMsg,
-        "INSERT INTO \"%w\".\"%w\"(%s) SELECT %s FROM \"%w\".\"%w\"",
-        zDb, zTmp, zCols, zCols, zDb, zTab);
-  }
-
-  /* Hand the saved DDL to phase 2, which runs after the DROP. */
-  if( rc==SQLITE_OK ){
-    db->pAlterRedo = azRedo;
-    azRedo = 0;
-    nRedo = 0;
-  }
-  goto alter_tabopt_out;
-
-alter_tabopt_err:
-  if( *pzErrMsg==0 ) sqlite3SetString(pzErrMsg, db, sqlite3_errmsg(db));
-
-alter_tabopt_out:
-  for(i=0; i<nRedo; i++) sqlite3DbFree(db, azRedo[i]);
-  sqlite3DbFree(db, azRedo);
-  sqlite3DbFree(db, zOldSql);
-  sqlite3DbFree(db, zNewSql);
-  sqlite3DbFree(db, zCols);
-  sqlite3DbFree(db, zTmp);
   sqlite3BtreeLeaveAll(db);
   return rc;
 }
@@ -5045,20 +4916,21 @@ static void alterSetStrict(
 }
 
 /*
-** Generate the three steps of a table rebuild.
+** Generate the three steps of a table rebuild, and work out in full, here,
+** every statement they will run.
 **
 ** The work is the same whatever provoked it, so it lives here rather than
 ** in each caller: build the replacement beside the original and copy the
-** rows in, drop the original, then give the replacement the original's
-** name and put its indexes and triggers back.  What the replacement is to
-** be is described by the zCol/zType/eWrOp arguments, which are handed
-** through to the opcode and interpreted there against the stored text.
+** rows in, drop the original, then give the replacement the original's name
+** and put its indexes and triggers back.  What the replacement is to be is
+** decided by the zCol/zType/eWrOp arguments, against the stored CREATE
+** TABLE text read below.
 **
 ** Only the middle step may destroy a b-tree, and it has to be generated
 ** here rather than run from inside the opcode: OP_Destroy refuses while
-** another statement is reading, and the statement that invokes an opcode
-** is itself one.  Generated into this statement, the reader count is one
-** and the drop is allowed, exactly as for a plain DROP TABLE.
+** another statement is reading, and the statement that invokes an opcode is
+** itself one.  Generated into this statement, the reader count is one and
+** the drop is allowed, exactly as for a plain DROP TABLE.
 **
 ** The DROP fires foreign key actions on any child row pointing at the
 ** table, and PRAGMA foreign_keys cannot be turned off inside a
@@ -5078,7 +4950,21 @@ static void alterCodeRebuild(
   AlterRebuild *pReb;
   SrcList *pDrop;
   Token tSchema, tName;
-  char *zTmp;
+  char *zName = 0;      /* The table's name, kept across the queries below */
+  char *zTmp = 0;       /* Name the replacement is built under */
+  char *zCols = 0;      /* Columns to carry across */
+  char *zOldSql = 0;    /* The stored CREATE TABLE */
+  char *zRetyped = 0;   /* zOldSql with the column retyped */
+  char *zFinal = 0;     /* What the table should end up stored under */
+  char *zCreate = 0;    /* The four statements of the plan */
+  char *zCopy = 0;
+  char *zRename = 0;
+  char *zRestore = 0;
+  char **azRedo = 0;    /* DDL of each index and trigger on the table */
+  int nRedo = 0;
+  u32 flags;
+  int rc = SQLITE_OK;
+  int i;
   Vdbe *v;
 
   if( db->flags & SQLITE_ForeignKeys ){
@@ -5099,35 +4985,147 @@ static void alterCodeRebuild(
     }
   }
 
-  /* Both phases derive the same name for the replacement, so it is not
-  ** passed between them.  It must therefore be free. */
-  zTmp = alterRebuildName(db, pTab->zName);
-  if( zTmp==0 ) return;
+  /* Everything wanted from the in-memory Table is taken now, before the
+  ** first nested query below.  A prepare can reload the schema, which would
+  ** leave pTab dangling; nothing after this point reads it. */
+  zName = sqlite3DbStrDup(db, pTab->zName);
+  /* The name the replacement is built under until it takes the
+  ** original's.  It must be free. */
+  zTmp = sqlite3MPrintf(db, "altertab_%s", pTab->zName);
+  if( eWrOp ){
+    flags = (eWrOp==1 ? TF_WithoutRowid : 0) | (pTab->tabFlags & TF_Strict);
+  }else{
+    flags = pTab->tabFlags & (TF_WithoutRowid|TF_Strict);
+  }
+  /* Generated columns are computed by the new table and must not be
+  ** copied. */
+  for(i=0; i<pTab->nCol; i++){
+    if( pTab->aCol[i].colFlags & COLFLAG_GENERATED ) continue;
+    zCols = sqlite3MPrintf(db, "%z%s\"%w\"", zCols, zCols?",":"",
+                           pTab->aCol[i].zCnName);
+  }
+  /* Only an OOM gets here: a table always has at least one column that is
+  ** not generated, which sqlite3EndTable() enforces. */
+  if( zName==0 || zTmp==0 || zCols==0 ) goto rebuild_exit;
+
   if( sqlite3FindTable(db, zTmp, zDb)!=0 ){
     sqlite3ErrorMsg(pParse, "cannot rebuild %s: table %s is in the way",
-                    pTab->zName, zTmp);
-    sqlite3DbFree(db, zTmp);
-    return;
+                    zName, zTmp);
+    goto rebuild_exit;
   }
-  sqlite3DbFree(db, zTmp);
 
+  /* The stored CREATE TABLE text, which is what the replacement's
+  ** definition is derived from.  It is only reachable by asking for it. */
+  zOldSql = alterQueryText(db, &rc, sqlite3MPrintf(db,
+      "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
+      " WHERE type='table' AND name=%Q COLLATE nocase", zDb, zName));
+  if( rc!=SQLITE_OK ) goto rebuild_dberr;
+  if( zOldSql==0 ){
+    sqlite3ErrorMsg(pParse, "cannot rebuild %s: it has no CREATE statement",
+                    zName);
+    goto rebuild_exit;
+  }
+
+  /* The DDL of every index and trigger on the table.  The DROP between the
+  ** two phases takes those objects with it, so their text is captured here
+  ** and replayed by phase 2.  Automatic indexes have a NULL sql and are
+  ** skipped: the new table makes its own. */
+  rc = alterCollectDdl(db, &azRedo, &nRedo, zDb, sqlite3MPrintf(db,
+      "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
+      " WHERE tbl_name=%Q COLLATE nocase AND sql IS NOT NULL"
+      " AND type IN ('index','trigger')", zDb, zName));
+  if( rc!=SQLITE_OK ) goto rebuild_dberr;
+
+  /* A TEMP trigger on a table in another schema is recorded in
+  ** temp.sqlite_schema, so the query above does not see it, but the DROP
+  ** does take it down.  Collect those too - unless TEMP has a table of its
+  ** own by this name, in which case they belong to that one and the DROP
+  ** will leave them alone.  An index cannot be in a different schema from
+  ** its table, so only triggers can turn up here. */
+  if( iDb!=1 && sqlite3FindTable(db, zName, db->aDb[1].zDbSName)==0 ){
+    rc = alterCollectDdl(db, &azRedo, &nRedo, db->aDb[1].zDbSName,
+      sqlite3MPrintf(db,
+        "SELECT sql FROM \"%w\"." LEGACY_SCHEMA_TABLE
+        " WHERE tbl_name=%Q COLLATE nocase AND sql IS NOT NULL"
+        " AND type='trigger'", db->aDb[1].zDbSName, zName));
+    if( rc!=SQLITE_OK ) goto rebuild_dberr;
+  }
+
+  /* Derive the replacement's definition, then spell out the four statements
+  ** the two phases will run. */
+  if( zCol ){
+    char *zErr = 0;
+    zRetyped = alterRetypeText(db, iDb, zOldSql, zCol, zType, &zErr);
+    if( zRetyped==0 ){
+      if( zErr ) sqlite3ErrorMsg(pParse, "%s", zErr);
+      sqlite3DbFree(db, zErr);
+      goto rebuild_exit;
+    }
+  }
+  {
+    const char *zBase = zRetyped ? zRetyped : zOldSql;
+    char *zTmpSql = alterRewriteCreate(db, iDb, zBase, flags, zTmp);
+    if( zTmpSql ){
+      zCreate = alterQualifyDdl(db, zDb, zTmpSql);
+      sqlite3DbFree(db, zTmpSql);
+    }
+    zFinal = alterRewriteCreate(db, iDb, zBase, flags, 0);
+  }
+  if( zCreate==0 || zFinal==0 ){
+    if( db->mallocFailed==0 ){
+      sqlite3ErrorMsg(pParse, "cannot rebuild %s: cannot rewrite its "
+                      "CREATE statement", zName);
+    }
+    goto rebuild_exit;
+  }
+  zCopy = sqlite3MPrintf(db,
+      "INSERT INTO \"%w\".\"%w\"(%s) SELECT %s FROM \"%w\".\"%w\"",
+      zDb, zTmp, zCols, zCols, zDb, zName);
+  zRename = sqlite3MPrintf(db, "ALTER TABLE \"%w\".\"%w\" RENAME TO \"%w\"",
+      zDb, zTmp, zName);
+  zRestore = sqlite3MPrintf(db,
+      "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET sql=%Q"
+      " WHERE type='table' AND name=%Q COLLATE nocase", zDb, zFinal, zName);
+  if( zCopy==0 || zRename==0 || zRestore==0 ) goto rebuild_exit;
+
+  /* The plan is settled.  Emit the three steps. */
   v = sqlite3GetVdbe(pParse);
-  if( v==0 ) return;
+  if( v==0 ) goto rebuild_exit;
   sqlite3MayAbort(pParse);
 
-  pReb = alterRebuildNew(db, pTab->zName, zCol, zType, eWrOp);
-  if( pReb==0 ) return;
+  pReb = alterRebuildNew(db, zCreate, zCopy, 0, 0, 0, 0);
+  if( pReb==0 ) goto rebuild_exit;
   sqlite3VdbeAddOp4(v, OP_AlterTabOpt, iDb, 0, 1, (char*)pReb, P4_DYNAMIC);
 
   sqlite3TokenInit(&tSchema, (char*)zDb);
-  sqlite3TokenInit(&tName, pTab->zName);
+  sqlite3TokenInit(&tName, zName);
   pDrop = sqlite3SrcListAppend(pParse, 0, &tSchema, &tName);
-  if( pDrop==0 ) return;
+  if( pDrop==0 ) goto rebuild_exit;
   sqlite3DropTable(pParse, pDrop, 0, 0);
 
-  pReb = alterRebuildNew(db, pTab->zName, zCol, zType, eWrOp);
-  if( pReb==0 ) return;
+  pReb = alterRebuildNew(db, 0, 0, zRename, zRestore, azRedo, nRedo);
+  if( pReb==0 ) goto rebuild_exit;
   sqlite3VdbeAddOp4(v, OP_AlterTabOpt, iDb, 0, 2, (char*)pReb, P4_DYNAMIC);
+  goto rebuild_exit;
+
+rebuild_dberr:
+  if( db->mallocFailed==0 ){
+    sqlite3ErrorMsg(pParse, "%s", sqlite3_errmsg(db));
+  }
+
+rebuild_exit:
+  for(i=0; i<nRedo; i++) sqlite3DbFree(db, azRedo[i]);
+  sqlite3DbFree(db, azRedo);
+  sqlite3DbFree(db, zName);
+  sqlite3DbFree(db, zTmp);
+  sqlite3DbFree(db, zCols);
+  sqlite3DbFree(db, zOldSql);
+  sqlite3DbFree(db, zRetyped);
+  sqlite3DbFree(db, zFinal);
+  sqlite3DbFree(db, zCreate);
+  sqlite3DbFree(db, zCopy);
+  sqlite3DbFree(db, zRename);
+  sqlite3DbFree(db, zRestore);
 }
 
 /*
