@@ -150,8 +150,6 @@ void sqlite3AlterRenameTable(
   int nTabName;             /* Number of UTF-8 characters in zTabName */
   const char *zTabName;     /* Original name of the table */
   Vdbe *v;
-
-  if( alterRefreshSchema(pParse) ) goto exit_rename_table;
   VTable *pVTab = 0;        /* Non-zero if this is a v-tab with an xRename() */
 
   if( NEVER(db->mallocFailed) ) goto exit_rename_table;
@@ -532,8 +530,6 @@ void sqlite3AlterBeginAddColumn(Parse *pParse, SrcList *pSrc){
   int nAlloc;
   sqlite3 *db = pParse->db;
 
-  if( alterRefreshSchema(pParse) ) goto exit_begin_add_column;
-
   /* Look up the table being altered. */
   assert( pParse->pNewTable==0 );
   assert( sqlite3BtreeHoldsAllMutexes(db) );
@@ -657,8 +653,6 @@ void sqlite3AlterRenameColumn(
   const char *zDb;                /* Name of schema containing the table */
   int iSchema;                    /* Index of the schema */
   int bQuote;                     /* True to quote the new name */
-
-  if( alterRefreshSchema(pParse) ) goto exit_rename_column;
 
   /* Locate the table to be altered */
   pTab = sqlite3LocateTableItem(pParse, 0, &pSrc->a[0]);
@@ -2318,8 +2312,6 @@ void sqlite3AlterDropColumn(Parse *pParse, SrcList *pSrc, const Token *pName){
   const char *zDb;                /* Database containing pTab ("main" etc.) */
   char *zCol = 0;                 /* Name of column to drop */
   int iCol;                       /* Index of column zCol in pTab->aCol[] */
-
-  if( alterRefreshSchema(pParse) ) goto exit_drop_column;
 
   /* Look up the table being altered. */
   assert( pParse->pNewTable==0 );
