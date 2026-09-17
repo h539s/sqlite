@@ -117,17 +117,6 @@ static void renameReloadSchema(Parse *pParse, int iDb, u16 p5){
   }
 }
 
-/* Reload the cached schema from the stored text, leaving schema_version alone. */
-static void alterRefreshSchema(Parse *pParse){
-  sqlite3 *db = pParse->db;
-  int i;
-  if( db->init.busy || db->nSchemaLock ) return;
-  for(i=0; i<db->nDb; i++){
-    if( db->aDb[i].pSchema ) sqlite3ResetOneSchema(db, i);
-  }
-  if( sqlite3ReadSchema(pParse) ) return;
-}
-
 /*
 ** Generate code to implement the "ALTER TABLE xxx RENAME TO yyy"
 ** command.
@@ -145,8 +134,6 @@ void sqlite3AlterRenameTable(
   int nTabName;             /* Number of UTF-8 characters in zTabName */
   const char *zTabName;     /* Original name of the table */
   Vdbe *v;
-
-  alterRefreshSchema(pParse);
   VTable *pVTab = 0;        /* Non-zero if this is a v-tab with an xRename() */
 
   if( NEVER(db->mallocFailed) ) goto exit_rename_table;
@@ -527,8 +514,6 @@ void sqlite3AlterBeginAddColumn(Parse *pParse, SrcList *pSrc){
   int nAlloc;
   sqlite3 *db = pParse->db;
 
-  alterRefreshSchema(pParse);
-
   /* Look up the table being altered. */
   assert( pParse->pNewTable==0 );
   assert( sqlite3BtreeHoldsAllMutexes(db) );
@@ -652,8 +637,6 @@ void sqlite3AlterRenameColumn(
   const char *zDb;                /* Name of schema containing the table */
   int iSchema;                    /* Index of the schema */
   int bQuote;                     /* True to quote the new name */
-
-  alterRefreshSchema(pParse);
 
   /* Locate the table to be altered */
   pTab = sqlite3LocateTableItem(pParse, 0, &pSrc->a[0]);
@@ -2314,8 +2297,6 @@ void sqlite3AlterDropColumn(Parse *pParse, SrcList *pSrc, const Token *pName){
   char *zCol = 0;                 /* Name of column to drop */
   int iCol;                       /* Index of column zCol in pTab->aCol[] */
 
-  alterRefreshSchema(pParse);
-
   /* Look up the table being altered. */
   assert( pParse->pNewTable==0 );
   assert( sqlite3BtreeHoldsAllMutexes(db) );
@@ -3132,7 +3113,6 @@ static Table *alterFindTable(
   int iOp               /* isRealTable() operation code for error messages */
 ){
   sqlite3 *db = pParse->db;
-  alterRefreshSchema(pParse);
   Table *pTab = 0;
   assert( sqlite3BtreeHoldsAllMutexes(db) );
   pTab = sqlite3LocateTableItem(pParse, 0, &pSrc->a[0]);

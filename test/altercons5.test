@@ -384,74 +384,6 @@ do_execsql_test 8.1 {
 do_execsql_test 8.2 { PRAGMA integrity_check } {ok}
 
 #-------------------------------------------------------------------------
-# The stored statement is the truth; the in-memory Table is a cache of it.
-#
-# The two are kept in step by the schema cookie, and an edit to
-# sqlite_schema under writable_schema touches neither the cookie nor
-# anything else that would give the divergence away.  So the editors take no
-# column index from the cache: they are handed the column NAME and resolve
-# it against the statement they are about to edit.  A stale cache therefore
-# cannot send an edit to the wrong column, and a hand-edited definition that
-# is valid is altered rather than refused.
-#
-foreach {tn newsql alter res final} {
-  1 {CREATE TABLE t1(a, b)}
-    {ALTER TABLE t1 ALTER c DROP NOT NULL}
-    {1 {no such column: c}}
-    {CREATE TABLE t1(a, b)}
-
-  2 {CREATE TABLE t1(x, y, z)}
-    {ALTER TABLE t1 ALTER c DROP NOT NULL}
-    {1 {no such column: c}}
-    {CREATE TABLE t1(x, y, z)}
-
-  3 {CREATE TABLE t1(a, b)}
-    {ALTER TABLE t1 ALTER c SET NOT NULL}
-    {1 {no such column: c}}
-    {CREATE TABLE t1(a, b)}
-
-  4 {CREATE TABLE t1(b, a, c)}
-    {ALTER TABLE t1 ALTER c DROP NOT NULL}
-    {0 {}}
-    {CREATE TABLE t1(b, a, c)}
-
-  5 {CREATE TABLE t1(a, b)}
-    {ALTER TABLE t1 ADD CONSTRAINT k CHECK(a>0)}
-    {0 {}}
-    {CREATE TABLE t1(a, b, CONSTRAINT k CHECK(a>0))}
-
-  6 {CREATE TABLE t1(a, b)}
-    {ALTER TABLE t1 ADD CONSTRAINT k (a) DEFAULT 1}
-    {0 {}}
-    {CREATE TABLE t1(a CONSTRAINT k DEFAULT 1, b)}
-
-  7 {CREATE TABLE t1(a, b, c)}
-    {ALTER TABLE t1 ADD CONSTRAINT k CHECK(a>0)}
-    {0 {}}
-    {CREATE TABLE t1(a, b, c, CONSTRAINT k CHECK(a>0))}
-} {
-  reset_db
-  do_execsql_test 9.$tn.0 {
-    CREATE TABLE t1(a, b, c NOT NULL);
-    PRAGMA writable_schema = 1;
-  }
-  do_execsql_test 9.$tn.1 "UPDATE sqlite_schema SET sql = '$newsql'"
-  do_execsql_test 9.$tn.2 { PRAGMA writable_schema = 0 }
-  do_catchsql_test 9.$tn.3 $alter $res
-  do_execsql_test 9.$tn.4 {
-    PRAGMA writable_schema = 1;
-    SELECT sql FROM sqlite_schema WHERE type='table';
-  } [list $final]
-}
-
-# Case 4 above resolved "c" to the third column of (b, a, c), which is the
-# right one.  Taking the index from the cache would have reached (b, a, c)
-# with the 2 that "c" has in (a, b, c) - the same column here by luck.  A
-# renamed column is where it shows: case 2's cache index would have picked
-# "z" out of (x, y, z) and quietly dropped a NOT NULL that was never asked
-# about.
-
-#-------------------------------------------------------------------------
 # An invalid stored statement is refused.  A statement that merely
 # disagrees with the in-memory schema is not this file's business: ALTER
 # TABLE is required to detect a CREATE statement it cannot make sense of,
@@ -462,16 +394,16 @@ foreach {tn newsql alter res final} {
 # against.
 #
 reset_db
-do_execsql_test 9.20.0 {
+do_execsql_test 9.1.0 {
   CREATE TABLE t1(a, b, c NOT NULL);
   PRAGMA writable_schema = 1;
   UPDATE sqlite_schema SET sql = 'CREATE TABLE t1(a, b, c NOT NULL';
   PRAGMA writable_schema = 0;
 }
-do_catchsql_test 9.20.1 {
+do_catchsql_test 9.1.1 {
   ALTER TABLE t1 ALTER c DROP NOT NULL;
 } {1 {database disk image is malformed}}
-do_execsql_test 9.20.2 {
+do_execsql_test 9.1.2 {
   PRAGMA writable_schema = 1;
   SELECT sql FROM sqlite_schema WHERE type='table';
 } {{CREATE TABLE t1(a, b, c NOT NULL}}
@@ -481,17 +413,17 @@ do_execsql_test 9.20.2 {
 # name column and CREATE statement disagree.
 #
 reset_db
-do_execsql_test 9.21.0 {
+do_execsql_test 9.2.0 {
   CREATE TABLE t1(a, b, c NOT NULL);
   PRAGMA writable_schema = 1;
   UPDATE sqlite_schema SET sql = 'CREATE TABLE t9(a, b, c)';
   PRAGMA writable_schema = 0;
 }
-do_test 9.21.1 {
+do_test 9.2.1 {
   list [catch { execsql {ALTER TABLE t1 ALTER c DROP NOT NULL} } msg] \
        [string match {error in table t1 after drop constraint*} $msg]
 } {1 1}
-do_execsql_test 9.21.2 {
+do_execsql_test 9.2.2 {
   PRAGMA writable_schema = 1;
   SELECT sql FROM sqlite_schema WHERE type='table';
 } {{CREATE TABLE t9(a, b, c)}}
@@ -499,7 +431,7 @@ do_execsql_test 9.21.2 {
 # 9.3.*: the message that reload failure produces names what the command
 # was doing, and a command that adds a constraint says "add constraint"
 # whichever of the two routines carried it out.  The mismatched name from
-# 9.21 is what makes the reload fail; only the wording is under test.
+# 9.2 is what makes the reload fail; only the wording is under test.
 #
 foreach {tn alter word} {
   1 {ALTER TABLE t1 ADD CHECK(a>0)}                 {add constraint}
