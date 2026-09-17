@@ -532,4 +532,32 @@ foreach {tn alter} {
   } {{CREATE TABLE t9(a, b, c)}}
 }
 
+#-------------------------------------------------------------------------
+# 10.*: the message a failed reload produces names the command that got
+# there.  Reaching it needs a schema that loads cleanly - so the refresh at
+# the top of the command is happy - and an edit that makes the statement
+# invalid.  A PRIMARY KEY over a generated column is one: CREATE TABLE
+# refuses it, and nothing before the reload does.
+#
+# This is what altercons5-9.30.* used to cover with a schema that was
+# already inconsistent, which the refresh now rejects up front.
+#
+reset_db
+do_execsql_test 10.0 {
+  CREATE TABLE t1(a, g AS (a*2));
+}
+do_catchsql_test 10.1 {
+  ALTER TABLE t1 ADD CONSTRAINT p PRIMARY KEY(g);
+} {1 {error in table t1 after add constraint: generated columns cannot be part of the PRIMARY KEY}}
+
+# The statement took the schema edit and the index it had already built
+# down with it.
+do_execsql_test 10.2 {
+  SELECT type, name FROM sqlite_schema;
+} {table t1}
+do_execsql_test 10.3 {
+  SELECT sql FROM sqlite_schema WHERE type='table';
+} {{CREATE TABLE t1(a, g AS (a*2))}}
+do_execsql_test 10.4 { PRAGMA integrity_check } {ok}
+
 finish_test
