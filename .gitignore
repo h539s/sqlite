@@ -24,6 +24,7 @@
 /shell.c
 /ctime.c
 /tclsqlite-ex.c
+/tclsqlite3.c
 /tsrc/
 
 # generated parser and tables
@@ -53,6 +54,8 @@
 /mksourceid
 /src-verify
 /jimsh
+/jimsh0
+/srcck1
 
 # programs
 /sqlite3
@@ -65,8 +68,20 @@
 /dbhash
 /showdb
 
-# test scratch
+# libraries, and the TCL extension "make tclextension-install" builds
+/libsqlite3.a
+/libsqlite3.so
+/libsqlite3.*.so
+/pkgIndex.tcl
+
+# test scratch, including the per-job directories and logs that
+# test/testrunner.tcl produces (one "testdir<N>" per parallel job, and one
+# "testrun_<build>_<target>" per build it drives)
 /testdir/
+/testdir[0-9]*/
+/testrun_*/
+/testrunner.db
+/testrunner.log
 /test.db
 /test.db-*
 /test.db2
