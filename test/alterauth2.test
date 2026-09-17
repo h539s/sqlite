@@ -120,7 +120,7 @@ do_auth_test 1.4 {
   ALTER TABLE t2 ALTER COLUMN b SET NOT NULL;
 } {
   {SQLITE_ALTER_TABLE main t2 b {}} 
-  {SQLITE_FUNCTION {} sqlite_drop_notnull {} {}} 
+  {SQLITE_FUNCTION {} sqlite_drop_colcons {} {}} 
   {SQLITE_FUNCTION {} sqlite_fail {} {}} 
   {SQLITE_FUNCTION {} sqlite_insert_constraint {} {}} 
   {SQLITE_READ sqlite_master sql main {}} 
@@ -134,7 +134,7 @@ do_auth_test 1.5 {
   ALTER TABLE t2 ALTER COLUMN 'b' DROP NOT NULL;
 } {
   {SQLITE_ALTER_TABLE main t2 b {}} 
-  {SQLITE_FUNCTION {} sqlite_drop_notnull {} {}} 
+  {SQLITE_FUNCTION {} sqlite_drop_colcons {} {}} 
   {SQLITE_READ sqlite_master sql main {}} 
   {SQLITE_READ sqlite_master tbl_name main {}} 
   {SQLITE_READ sqlite_master type main {}} 
@@ -186,7 +186,7 @@ do_auth_test 1.9 {
   ALTER TABLE t2 COLUMN b DROP DEFAULT;
 } {
   {SQLITE_ALTER_TABLE main t2 b {}}
-  {SQLITE_FUNCTION {} sqlite_drop_default {} {}}
+  {SQLITE_FUNCTION {} sqlite_drop_colcons {} {}}
   {SQLITE_READ sqlite_master sql main {}}
   {SQLITE_READ sqlite_master tbl_name main {}}
   {SQLITE_READ sqlite_master type main {}}
@@ -196,7 +196,7 @@ do_auth_test 1.10 {
   ALTER TABLE t2 COLUMN b DROP CHECK;
 } {
   {SQLITE_ALTER_TABLE main t2 b {}}
-  {SQLITE_FUNCTION {} sqlite_drop_check {} {}}
+  {SQLITE_FUNCTION {} sqlite_drop_colcons {} {}}
   {SQLITE_READ sqlite_master sql main {}}
   {SQLITE_READ sqlite_master tbl_name main {}}
   {SQLITE_READ sqlite_master type main {}}

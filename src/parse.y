@@ -403,20 +403,20 @@ ccons ::= CONSTRAINT(C) nm(X). {
 // COLUMN <c> DROP DEFAULT.  Only during the reparse of a stored statement.
 ccons ::= DEFAULT(D) scantok(A) term(X). {
   sqlite3AddDefaultValue(pParse,X,A.z,&A.z[A.n]);
-  if( IN_RENAME_OBJECT ) sqlite3DefaultLocAdd(pParse, &D);
+  if( IN_RENAME_OBJECT ) sqlite3ColConsLocAdd(pParse, PARSELOC_Default, &D, 1);
 }
 ccons ::= DEFAULT(D) LP(A) expr(X) RP(Z). {
   sqlite3AddDefaultValue(pParse,X,A.z+1,Z.z);
-  if( IN_RENAME_OBJECT ) sqlite3DefaultLocAdd(pParse, &D);
+  if( IN_RENAME_OBJECT ) sqlite3ColConsLocAdd(pParse, PARSELOC_Default, &D, 1);
 }
 ccons ::= DEFAULT(D) PLUS(A) scantok(Z) term(X). {
   sqlite3AddDefaultValue(pParse,X,A.z,&Z.z[Z.n]);
-  if( IN_RENAME_OBJECT ) sqlite3DefaultLocAdd(pParse, &D);
+  if( IN_RENAME_OBJECT ) sqlite3ColConsLocAdd(pParse, PARSELOC_Default, &D, 1);
 }
 ccons ::= DEFAULT(D) MINUS(A) scantok(Z) term(X). {
   Expr *p = sqlite3PExpr(pParse, TK_UMINUS, X, 0);
   sqlite3AddDefaultValue(pParse,p,A.z,&Z.z[Z.n]);
-  if( IN_RENAME_OBJECT ) sqlite3DefaultLocAdd(pParse, &D);
+  if( IN_RENAME_OBJECT ) sqlite3ColConsLocAdd(pParse, PARSELOC_Default, &D, 1);
 }
 ccons ::= DEFAULT(D) scantok id(X).       {
   Expr *p = tokenExpr(pParse, TK_STRING, X);
@@ -425,7 +425,7 @@ ccons ::= DEFAULT(D) scantok id(X).       {
     testcase( p->op==TK_TRUEFALSE && sqlite3ExprTruthValue(p) );
   }
     sqlite3AddDefaultValue(pParse,p,X.z,X.z+X.n);
-  if( IN_RENAME_OBJECT ) sqlite3DefaultLocAdd(pParse, &D);
+  if( IN_RENAME_OBJECT ) sqlite3ColConsLocAdd(pParse, PARSELOC_Default, &D, 1);
 }
 
 // In addition to the type name, we also care about the primary key and
@@ -446,7 +446,7 @@ ccons ::= UNIQUE onconf(R).      {sqlite3CreateIndex(pParse,0,0,0,0,R,0,0,0,0,
                                    SQLITE_IDXTYPE_UNIQUE);}
 ccons ::= CHECK(C) LP(A) expr(X) RP(B). {
   sqlite3AddCheckConstraint(pParse,X,A.z,B.z);
-  if( IN_RENAME_OBJECT ) sqlite3CheckLocAdd(pParse, &C, 1);
+  if( IN_RENAME_OBJECT ) sqlite3ColConsLocAdd(pParse, PARSELOC_Check, &C, 1);
 }
 ccons ::= REFERENCES(F) nm(T) eidlist_opt(TA) refargs(R).
                              {sqlite3CreateForeignKey(pParse,0,&T,TA,R,&F);}
@@ -522,7 +522,7 @@ tcons ::= UNIQUE LP sortlist(X) RP onconf(R).
                                        SQLITE_IDXTYPE_UNIQUE);}
 tcons ::= CHECK(C) LP(A) expr(E) RP(B) onconf. {
   sqlite3AddCheckConstraint(pParse,E,A.z,B.z);
-  if( IN_RENAME_OBJECT ) sqlite3CheckLocAdd(pParse, &C, 0);
+  if( IN_RENAME_OBJECT ) sqlite3ColConsLocAdd(pParse, PARSELOC_Check, &C, 0);
 }
 tcons ::= FOREIGN(F) KEY LP eidlist(FA) RP
           REFERENCES nm(T) eidlist_opt(TA) refargs(R) defer_subclause_opt(D). {
@@ -1969,7 +1969,7 @@ cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT PRIMARY KEY. {
 // A DEFAULT belongs to one column rather than to the table, so the column
 // is named and the constraint is reached by kind.
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) DROP DEFAULT. {
-  sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_default");
+  sqlite3AlterDropConstraint(pParse, X, 0, &Y, PARSELOC_Default);
 }
 // A FOREIGN KEY need not have a name either, so it is named by what it
 // says.  The parent column list is optional here for the same reason it is
@@ -1991,10 +1991,10 @@ cmd ::= ALTER TABLE fullname(X) DROP CHECK. {
   sqlite3AlterDropCheck(pParse, X);
 }
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) DROP CHECK. {
-  sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_check");
+  sqlite3AlterDropConstraint(pParse, X, 0, &Y, PARSELOC_Check);
 }
 cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) DROP NOT NULL. {
-  sqlite3AlterDropConstraint(pParse, X, 0, &Y, "sqlite_drop_notnull");
+  sqlite3AlterDropConstraint(pParse, X, 0, &Y, PARSELOC_NotNull);
 }
 cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) SET NOT(Z) NULL onconf. {
   sqlite3AlterSetNotNull(pParse, X, &Y, &Z);

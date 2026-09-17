@@ -4761,7 +4761,6 @@ void sqlite3CodeDropIndex(Parse *pParse, Index *pIndex, int iDb){
 */
 void sqlite3DropIndex(Parse *pParse, SrcList *pName, int ifExists){
   Index *pIndex;
-  Vdbe *v;
   sqlite3 *db = pParse->db;
   int iDb;
 

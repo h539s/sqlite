@@ -23,7 +23,7 @@
 # last one win; all of them are removed.
 #
 # The column is resolved by name against the stored statement - see
-# alterColumnIndex() - which is what sqlite_drop_notnull() does, whose
+# alterColumnIndex() - which is what sqlite_drop_colcons() does, whose
 # implementation this one shares.
 #
 

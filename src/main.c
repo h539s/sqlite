@@ -1490,6 +1490,10 @@ void sqlite3LeaveMutexAndCloseZombie(sqlite3 *db){
   ** structure?
   */
   sqlite3DbFree(db, db->aDb[1].pSchema);
+#ifndef SQLITE_OMIT_ALTERTABLE
+  /* A table rebuild that failed between its two phases leaves this behind. */
+  sqlite3AlterRedoFree(db);
+#endif
   if( db->xAutovacDestr ){
     db->xAutovacDestr(db->pAutovacPagesArg);
   }

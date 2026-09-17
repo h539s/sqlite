@@ -5583,7 +5583,8 @@ void sqlite3Reindex(Parse*, Token*, Token*);
 void sqlite3AlterFunctions(void);
 void sqlite3AlterRenameTable(Parse*, SrcList*, Token*);
 void sqlite3AlterRenameColumn(Parse*, SrcList*, Token*, Token*);
-void sqlite3AlterDropConstraint(Parse*,SrcList*,Token*,Token*,const char*);
+void sqlite3AlterDropConstraint(Parse*,SrcList*,Token*,Token*,int);
+void sqlite3AlterRedoFree(sqlite3*);
 void sqlite3AlterAddConstraint(
   Parse *pParse,           /* Parse context */
   SrcList *pSrc,           /* Table to add constraint to */
@@ -5639,9 +5640,8 @@ void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Expr*,
 void sqlite3ConsLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ColDefLocExtend(Parse*);
-void sqlite3DefaultLocAdd(Parse*, Token*);
 void sqlite3FkLocExtend(Parse*, const char*);
-void sqlite3CheckLocAdd(Parse*, Token*, int);
+void sqlite3ColConsLocAdd(Parse*, u8, Token*, int);
 void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 /* Allowed values for the second argument to sqlite3ParseLocAdd().  See the
 ** comment on struct ParseLoc in alter.c for what each one records. */
