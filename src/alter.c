@@ -2553,6 +2553,46 @@ void sqlite3ColConsLocAdd(Parse *pParse, u8 eType, Token *pKw, int bCol){
   sqlite3ConsLocAdd(pParse, eType, iCol, pKw->z, &pKw->z[pKw->n]);
 }
 
+/* Record a GENERATED clause; the "GENERATED ALWAYS" the type name swallowed
+** is part of it and comes too. */
+void sqlite3GenLocAdd(Parse *pParse, Token *pKw){
+  Table *p = pParse->pNewTable;
+  ParseLoc *pLoc;
+  ParseLoc *pDef;
+  const char *z;
+  const char *zGen;
+  int iCol;
+  int i;
+
+  assert( IN_RENAME_OBJECT );
+  if( p==0 || p->nCol<=0 ) return;
+  iCol = p->nCol-1;
+  pLoc = sqlite3ConsLocAdd(pParse, PARSELOC_Generated, iCol,
+                           pKw->z, &pKw->z[pKw->n]);
+  if( pLoc==0 ) return;
+
+  for(pDef=pParse->pLoc; pDef; pDef=pDef->pNext){
+    if( pDef->eType==PARSELOC_ColDef && pDef->iCol==iCol ) break;
+  }
+  if( pDef==0 ) return;
+  z = &pDef->t.z[pDef->t.n];
+  if( z>pLoc->t.z ) return;
+  z += getWhitespace((const u8*)z);
+  zGen = z;
+  for(i=0; i<2; i++){
+    static const char *azWord[2] = { "generated", "always" };
+    static const int aLen[2] = { 9, 6 };
+    int t = 0;
+    int n = sqlite3GetToken((const u8*)z, &t);
+    if( n!=aLen[i] || sqlite3_strnicmp(z, azWord[i], n)!=0 ) return;
+    z += n;
+    z += getWhitespace((const u8*)z);
+  }
+  if( z!=pLoc->t.z ) return;
+  pLoc->t.n += (unsigned)(pLoc->t.z - zGen);
+  pLoc->t.z = zGen;
+}
+
 /* Record a UNIQUE clause, with the columns it covers, for DROP UNIQUE. */
 void sqlite3UniqueLocAdd(Parse *pParse, Token *pKw, ExprList *pList){
   sqlite3 *db = pParse->db;
@@ -4095,13 +4135,31 @@ static char *alterSpliceType(
                         pLoc->n==0 ? " " : "", zType, &zSql[iEnd]);
 }
 
-/* Copy of zSql with column zCol's declared type replaced by zType. */
-static char *alterRetypeText(
+/* Copy of zSql with the clause at pLoc cut out of it. */
+static char *alterCutClause(sqlite3 *db, const char *zSql, const Token *pLoc){
+  int nOut = sqlite3Strlen30(zSql);
+  char *zOut = sqlite3DbMallocRaw(db, (i64)nOut+1);
+  if( zOut==0 ) return 0;
+  memcpy(zOut, zSql, (size_t)nOut+1);
+  nOut = alterExciseClause(zOut, nOut, zSql, pLoc);
+  zOut[nOut] = 0;
+  return zOut;
+}
+
+/* One change to one column's definition, for alterEditColText(). */
+typedef struct AlterColEdit AlterColEdit;
+struct AlterColEdit {
+  const char *zCol;
+  u8 eType;
+  const char *zText;
+};
+
+/* Copy of zSql with pEdit applied to the column it names. */
+static char *alterEditColText(
   sqlite3 *db,
   int iDb,
   const char *zSql,
-  const char *zCol,
-  const char *zType,
+  const AlterColEdit *pEdit,
   char **pzErr
 ){
   Parse sParse;
@@ -4111,23 +4169,38 @@ static char *alterRetypeText(
   int iCol;
 
   if( renameParseSql(&sParse, db->aDb[iDb].zDbSName, db, zSql, iDb==1) ){
-    goto retype_out;
+    goto edit_col_out;
   }
   pTab = sParse.pNewTable;
-  if( pTab==0 || !IsOrdinaryTable(pTab) ) goto retype_out;
-  iCol = alterColumnIndex(pTab, zCol);
+  if( pTab==0 || !IsOrdinaryTable(pTab) ) goto edit_col_out;
+  iCol = alterColumnIndex(pTab, pEdit->zCol);
   if( iCol<0 ){
-    if( pzErr ) *pzErr = sqlite3MPrintf(db, "no such column: %s", zCol);
-    goto retype_out;
+    if( pzErr ) *pzErr = sqlite3MPrintf(db, "no such column: %s", pEdit->zCol);
+    goto edit_col_out;
   }
   for(p=sParse.pLoc; p; p=p->pNext){
-    if( p->eType==PARSELOC_ColType && p->iCol==iCol ) break;
+    if( p->eType==pEdit->eType && p->iCol==iCol ) break;
   }
-  if( p==0 ) goto retype_out;
+  if( p ){
+    if( pEdit->zText ){
+      zNew = alterSpliceType(db, zSql, &p->t, pEdit->zText);
+    }else{
+      zNew = alterCutClause(db, zSql, &p->t);
+    }
+    goto edit_col_out;
+  }
 
-  zNew = alterSpliceType(db, zSql, &p->t, zType);
+  if( pEdit->zText==0 ) goto edit_col_out;
+  for(p=sParse.pLoc; p; p=p->pNext){
+    if( p->eType==PARSELOC_ColDef && p->iCol==iCol ) break;
+  }
+  if( p ){
+    int iOff = (int)(p->t.z - zSql) + (int)p->t.n;
+    zNew = sqlite3MPrintf(db, "%.*s %s%s", iOff, zSql, pEdit->zText,
+                          &zSql[iOff]);
+  }
 
-retype_out:
+edit_col_out:
   renameParseCleanup(&sParse);
   return zNew;
 }
@@ -4303,8 +4376,7 @@ static void alterCodeRebuild(
   Parse *pParse,
   Table *pTab,
   int iDb,
-  const char *zCol,
-  const char *zType,
+  const AlterColEdit *pEdit,
   u8 eWrOp
 ){
   sqlite3 *db = pParse->db;
@@ -4355,7 +4427,13 @@ static void alterCodeRebuild(
     flags = pTab->tabFlags & (TF_WithoutRowid|TF_Strict);
   }
   for(i=0; i<pTab->nCol; i++){
-    if( pTab->aCol[i].colFlags & COLFLAG_GENERATED ) continue;
+    int bGen = (pTab->aCol[i].colFlags & COLFLAG_GENERATED)!=0;
+    if( pEdit && pEdit->eType==PARSELOC_Generated
+     && sqlite3_stricmp(pTab->aCol[i].zCnName, pEdit->zCol)==0
+    ){
+      bGen = pEdit->zText!=0;
+    }
+    if( bGen ) continue;
     zCols = sqlite3MPrintf(db, "%z%s\"%w\"", zCols, zCols?",":"",
                            pTab->aCol[i].zCnName);
   }
@@ -4392,9 +4470,9 @@ static void alterCodeRebuild(
     if( rc!=SQLITE_OK ) goto rebuild_dberr;
   }
 
-  if( zCol ){
+  if( pEdit ){
     char *zErr = 0;
-    zRetyped = alterRetypeText(db, iDb, zOldSql, zCol, zType, &zErr);
+    zRetyped = alterEditColText(db, iDb, zOldSql, pEdit, &zErr);
     if( zRetyped==0 ){
       if( zErr ) sqlite3ErrorMsg(pParse, "%s", zErr);
       sqlite3DbFree(db, zErr);
@@ -4487,7 +4565,7 @@ static void alterSetWithoutRowid(
     }
   }
 
-  alterCodeRebuild(pParse, pTab, iDb, 0, 0, bOn ? 1 : 2);
+  alterCodeRebuild(pParse, pTab, iDb, 0, bOn ? 1 : 2);
 }
 
 /* ALTER TABLE SET <table-option> ON|OFF. */
@@ -4740,6 +4818,144 @@ set_coltype_done:
   alterEditFinish(&x, ctx);
 }
 
+/* ALTER TABLE COLUMN <c> DROP GENERATED.  A STORED column is in every record
+** already, so that is a text edit; a VIRTUAL one is in none, so its values
+** have to be written, which is a rebuild. */
+void sqlite3AlterDropGenerated(Parse *pParse, SrcList *pSrc, Token *pCol){
+  sqlite3 *db = pParse->db;
+  Table *pTab;
+  Column *pTabCol;
+  int iDb = 0;
+  int iCol = 0;
+  const char *zDb = 0;
+
+  assert( pSrc->nSrc==1 );
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0, 2);
+  if( pTab==0 ) return;
+  if( alterFindCol(pParse, pTab, pCol, &iCol) ) return;
+  pTabCol = &pTab->aCol[iCol];
+
+  if( (pTabCol->colFlags & COLFLAG_GENERATED)==0 ){
+    sqlite3ErrorMsg(pParse, "column \"%s\" is not a generated column",
+                    pTabCol->zCnName);
+    return;
+  }
+
+  if( pTabCol->colFlags & COLFLAG_STORED ){
+    char *zArg = sqlite3MPrintf(db, "sqlite_drop_colcons(%d, sql, %d, %d)",
+                                iDb, iCol, PARSELOC_Generated);
+    if( zArg==0 ) return;
+    alterUpdateSchemaSql(pParse, pTab, zDb, "%s", zArg);
+    sqlite3DbFree(db, zArg);
+    renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
+  }else{
+    AlterColEdit sEdit;
+    char *zCol = sqlite3DbStrDup(db, pTabCol->zCnName);
+    if( zCol==0 ) return;
+    sEdit.zCol = zCol;
+    sEdit.eType = PARSELOC_Generated;
+    sEdit.zText = 0;
+    alterCodeRebuild(pParse, pTab, iDb, &sEdit, 0);
+    sqlite3DbFree(db, zCol);
+  }
+}
+
+/* ALTER TABLE COLUMN <c> ADD GENERATED ALWAYS AS (<expr>) [STORED|VIRTUAL].
+** Always a rebuild: every row has to be written afresh from the expression. */
+void sqlite3AlterAddGenerated(
+  Parse *pParse,
+  SrcList *pSrc,
+  Token *pCol,
+  Token *pKw,
+  Expr *pExpr,
+  Token *pKind
+){
+  sqlite3 *db = pParse->db;
+  Table *pTab;
+  Column *pTabCol;
+  AlterColEdit sEdit;
+  int iDb = 0;
+  int iCol = 0;
+  int nOther = 0;
+  int i;
+  const char *zDb = 0;
+  const char *pCons;
+  int nCons;
+  char *zCol = 0;
+  char *zText = 0;
+
+  assert( pSrc->nSrc==1 );
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0, 2);
+  if( pTab==0 ){
+    sqlite3ExprDelete(db, pExpr);
+    return;
+  }
+  if( alterFindCol(pParse, pTab, pCol, &iCol) ){
+    sqlite3ExprDelete(db, pExpr);
+    return;
+  }
+  pTabCol = &pTab->aCol[iCol];
+
+  if( pKind->n>0
+   && !(pKind->n==6 && sqlite3_strnicmp(pKind->z, "stored", 6)==0)
+   && !(pKind->n==7 && sqlite3_strnicmp(pKind->z, "virtual", 7)==0)
+  ){
+    sqlite3ErrorMsg(pParse, "expected STORED or VIRTUAL, got: %T", pKind);
+    goto add_generated_exit;
+  }
+  if( pTabCol->colFlags & COLFLAG_GENERATED ){
+    sqlite3ErrorMsg(pParse, "column \"%s\" is already a generated column",
+                    pTabCol->zCnName);
+    goto add_generated_exit;
+  }
+  if( pTab->iPKey==iCol ){
+    sqlite3ErrorMsg(pParse, "cannot make column \"%s\" generated: "
+                    "it holds the rowid", pTabCol->zCnName);
+    goto add_generated_exit;
+  }
+  if( alterColInPk(pTab, iCol) ){
+    sqlite3ErrorMsg(pParse, "cannot make column \"%s\" generated: "
+                    "it is part of the PRIMARY KEY", pTabCol->zCnName);
+    goto add_generated_exit;
+  }
+  if( sqlite3ColumnExpr(pTab, pTabCol)!=0 ){
+    sqlite3ErrorMsg(pParse, "cannot make column \"%s\" generated: "
+                    "it has a default value", pTabCol->zCnName);
+    goto add_generated_exit;
+  }
+  for(i=0; i<pTab->nCol; i++){
+    if( i!=iCol && (pTab->aCol[i].colFlags & COLFLAG_GENERATED)==0 ) nOther++;
+  }
+  if( nOther==0 ){
+    sqlite3ErrorMsg(pParse, "cannot make column \"%s\" generated: "
+                    "table \"%s\" would have no ordinary column left",
+                    pTabCol->zCnName, pTab->zName);
+    goto add_generated_exit;
+  }
+  if( sqlite3ResolveSelfReference(pParse, pTab, NC_GenCol, pExpr, 0) ){
+    goto add_generated_exit;
+  }
+#ifndef SQLITE_OMIT_AUTHORIZATION
+  if( db->xAuth ) sqlite3FuncAuth(pParse, pExpr);
+#endif
+
+  pCons = pKw->z;
+  nCons = alterRtrimConstraint(db, pCons, pParse->sLastToken.z - pCons);
+  zText = sqlite3MPrintf(db, "%.*s", nCons, pCons);
+  zCol = sqlite3DbStrDup(db, pTabCol->zCnName);
+  if( zText==0 || zCol==0 ) goto add_generated_exit;
+
+  sEdit.zCol = zCol;
+  sEdit.eType = PARSELOC_Generated;
+  sEdit.zText = zText;
+  alterCodeRebuild(pParse, pTab, iDb, &sEdit, 0);
+
+add_generated_exit:
+  sqlite3ExprDelete(db, pExpr);
+  sqlite3DbFree(db, zText);
+  sqlite3DbFree(db, zCol);
+}
+
 /* ALTER TABLE COLUMN <c> SET TYPE <type>. */
 void sqlite3AlterSetColumnType(
   Parse *pParse,
@@ -4778,7 +4994,11 @@ void sqlite3AlterSetColumnType(
   }
 
   if( bRebuild ){
-    alterCodeRebuild(pParse, pTab, iDb, zCol, zType, 0);
+    AlterColEdit sEdit;
+    sEdit.zCol = zCol;
+    sEdit.eType = PARSELOC_ColType;
+    sEdit.zText = zType;
+    alterCodeRebuild(pParse, pTab, iDb, &sEdit, 0);
   }else{
     alterUpdateSchemaSql(pParse, pTab, zDb,
         "sqlite_set_coltype(%d, sql, %d, %Q)", iDb, iCol, zType

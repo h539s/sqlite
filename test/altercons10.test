@@ -40,6 +40,7 @@ foreach {tn setup alter} {
   8 {CREATE TABLE t1(a INT, b INT);}          {ALTER TABLE t1 SET STRICT ON}
   9 {CREATE TABLE t1(a INT, b INT) STRICT;}   {ALTER TABLE t1 SET STRICT OFF}
  10 {CREATE TABLE t1(a, b, UNIQUE(a));}       {ALTER TABLE t1 DROP UNIQUE(a)}
+ 11 {CREATE TABLE t1(a, b AS (a*2) STORED);}  {ALTER TABLE t1 COLUMN b DROP GENERATED}
 } {
   reset_db
   db eval $setup

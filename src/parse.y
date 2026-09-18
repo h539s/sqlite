@@ -449,8 +449,12 @@ ccons ::= defer_subclause(D).    {
   if( IN_RENAME_OBJECT ) sqlite3FkDeferLocAdd(pParse, pParse->sLastToken.z);
 }
 ccons ::= COLLATE ids(C).        {sqlite3AddCollateType(pParse, &C);}
-ccons ::= GENERATED ALWAYS AS generated.
-ccons ::= AS generated.
+ccons ::= GENERATED(G) ALWAYS AS generated. {
+  if( IN_RENAME_OBJECT ) sqlite3GenLocAdd(pParse, &G);
+}
+ccons ::= AS(G) generated. {
+  if( IN_RENAME_OBJECT ) sqlite3GenLocAdd(pParse, &G);
+}
 generated ::= LP expr(E) RP.          {sqlite3AddGenerated(pParse,E,0);}
 generated ::= LP expr(E) RP ID(TYPE). {sqlite3AddGenerated(pParse,E,&TYPE);}
 
@@ -1979,6 +1983,17 @@ cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) nm(N) LP(A) expr(E) RP(B) onconf. {
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) SET TYPE typetoken(Z). {
   sqlite3AlterSetColumnType(pParse, X, &Y, &Z);
 }
+cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(C) DROP GENERATED. {
+  sqlite3AlterDropGenerated(pParse, X, &C);
+}
+cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(C) ADD GENERATED(G) ALWAYS AS
+        LP expr(E) RP genkind(K). {
+  sqlite3AlterAddGenerated(pParse, X, &C, &G, E, &K);
+}
+
+%type genkind {Token}
+genkind(A) ::= .        {A.z = 0; A.n = 0;}
+genkind(A) ::= ID(X).   {A = X;}
 cmd ::= ALTER TABLE fullname(X) SET WITHOUT nm(Y) onoff(Z). {
   sqlite3AlterSetTableOption(pParse, X, &Y, Z, 1);
 }

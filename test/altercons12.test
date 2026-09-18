@@ -1,0 +1,351 @@
+# 2026 September 18
+#
+# The author disclaims copyright to this source code.  In place of
+# a legal notice, here is a blessing:
+#
+#    May you do good and not evil.
+#    May you find forgiveness for yourself and forgive others.
+#    May you share freely, never taking more than you give.
+#
+#*************************************************************************
+#
+# Tests for
+#
+#   ALTER TABLE <table> COLUMN <column> DROP GENERATED
+#   ALTER TABLE <table> COLUMN <column> ADD GENERATED ALWAYS AS (<expr>)
+#                                                     [STORED | VIRTUAL]
+#
+# A generated column is not a constraint on the values a column may hold -
+# it says where those values come from.  So changing it is a question about
+# the rows, not about the text:
+#
+#   *  A STORED column is in every record already, written under the
+#      affinity its declaration gives it.  Dropping the clause leaves the
+#      rows and every index over them exactly as they are, so that one is a
+#      text edit.
+#
+#   *  A VIRTUAL column is in no record at all - it is computed when read.
+#      An ordinary column of that name would therefore read back NULL for
+#      every row, so keeping the values means writing them: a rebuild.
+#
+#   *  Making a column generated is always a rebuild.  The values it holds
+#      now are whatever was put there, and a generated column holds what its
+#      expression says; a VIRTUAL one also stops being in the record.
+#
+# GENERATED and ALWAYS are identifier fallbacks, so the parser reads
+# "GENERATED ALWAYS" as the tail of the column's type name and trims it off
+# again.  The two words belong to the clause all the same, and leave with
+# it.
+
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+set testprefix altercons12
+
+# If SQLITE_OMIT_ALTERTABLE is defined, omit this file.
+ifcapable !altertable {
+  finish_test
+  return
+}
+
+#-------------------------------------------------------------------------
+# 1.*: DROP GENERATED, written every way a CREATE TABLE accepts.  The
+# column keeps the values it had, and what is left is the table that would
+# have been created without the clause.
+#
+foreach {tn before after} {
+  1 { CREATE TABLE t1(a, c INT GENERATED ALWAYS AS (a*3) STORED) }
+    { CREATE TABLE t1(a, c INT) }
+
+  2 { CREATE TABLE t1(a, c GENERATED ALWAYS AS (a*3) STORED) }
+    { CREATE TABLE t1(a, c) }
+
+  3 { CREATE TABLE t1(a, c INT AS (a*3) STORED) }
+    { CREATE TABLE t1(a, c INT) }
+
+  4 { CREATE TABLE t1(a, c INT NOT NULL GENERATED ALWAYS AS (a*3) STORED) }
+    { CREATE TABLE t1(a, c INT NOT NULL) }
+
+  5 { CREATE TABLE t1(a, c INT GENERATED ALWAYS AS (a*3) VIRTUAL) }
+    { CREATE TABLE t1(a, c INT) }
+
+  6 { CREATE TABLE t1(a, c AS (a*3)) }
+    { CREATE TABLE t1(a, c) }
+
+  7 { CREATE TABLE t1(a, c GENERATED ALWAYS AS (a*3), d) }
+    { CREATE TABLE t1(a, c, d) }
+
+  8 { CREATE TABLE t1(a, c CONSTRAINT k GENERATED ALWAYS AS (a*3) STORED) }
+    { CREATE TABLE t1(a, c) }
+} {
+  reset_db
+  do_execsql_test 1.$tn.1 $before
+  do_execsql_test 1.$tn.2 { INSERT INTO t1(a) VALUES(2), (5) }
+  do_execsql_test 1.$tn.3 {
+    ALTER TABLE t1 COLUMN c DROP GENERATED;
+    SELECT sql FROM sqlite_schema WHERE name='t1';
+  } [list [string trim $after]]
+
+  # The values the column computed are the values it now holds.
+  do_execsql_test 1.$tn.4 { SELECT a, c FROM t1 ORDER BY a } {2 6 5 15}
+  do_execsql_test 1.$tn.5 { PRAGMA integrity_check } {ok}
+
+  # And it is an ordinary column now: it takes what it is given.
+  do_execsql_test 1.$tn.6 {
+    INSERT INTO t1(a, c) VALUES(7, 999);
+    SELECT c FROM t1 WHERE a=7;
+  } {999}
+}
+
+#-------------------------------------------------------------------------
+# 2.*: the shape of the table that is left matches one created that way.
+#
+foreach {tn before after} {
+  1 { CREATE TABLE t1(a, c INT AS (a*3) STORED, d TEXT) }
+    { CREATE TABLE t1(a, c INT, d TEXT) }
+
+  2 { CREATE TABLE t1(a, c INT AS (a*3) VIRTUAL, d TEXT) }
+    { CREATE TABLE t1(a, c INT, d TEXT) }
+} {
+  set probe {
+    SELECT cid, name, type, "notnull", coalesce(dflt_value,'~'), pk, hidden
+      FROM pragma_table_xinfo('t1');
+    SELECT wr, strict, ncol FROM pragma_table_list WHERE name='t1';
+  }
+  reset_db
+  execsql $after
+  set ref [execsql $probe]
+
+  reset_db
+  execsql $before
+  do_execsql_test 2.$tn.1 "
+    ALTER TABLE t1 COLUMN c DROP GENERATED;
+    $probe
+  " $ref
+  do_execsql_test 2.$tn.2 { PRAGMA integrity_check } {ok}
+}
+
+#-------------------------------------------------------------------------
+# 3.*: the indexes and triggers of the table survive the rebuild that a
+# VIRTUAL column needs, and an index over the column itself is rebuilt
+# against the values that are now stored.
+#
+reset_db
+do_execsql_test 3.0 {
+  CREATE TABLE t1(a, c AS (a*3) VIRTUAL, d);
+  INSERT INTO t1(a,d) VALUES(2,'x'), (5,'y');
+  CREATE INDEX ix1 ON t1(c);
+  CREATE INDEX ix2 ON t1(d);
+  CREATE TRIGGER tr1 AFTER INSERT ON t1 BEGIN SELECT 1; END;
+}
+do_execsql_test 3.1 {
+  ALTER TABLE t1 COLUMN c DROP GENERATED;
+  SELECT type, name FROM sqlite_schema ORDER BY name;
+} {index ix1 index ix2 table t1 trigger tr1}
+do_execsql_test 3.2 { PRAGMA integrity_check } {ok}
+do_execsql_test 3.3 {
+  SELECT a, c, d FROM t1 ORDER BY a;
+} {2 6 x 5 15 y}
+do_execsql_test 3.4 {
+  SELECT a FROM t1 WHERE c=15;
+} {5}
+
+#-------------------------------------------------------------------------
+# 4.*: ADD GENERATED.  The values the column held are replaced by what the
+# expression says, for every row.
+#
+foreach {tn kind hidden} {
+  1 {STORED}  3
+  2 {VIRTUAL} 2
+  3 {}        2
+} {
+  reset_db
+  do_execsql_test 4.$tn.1 {
+    CREATE TABLE t1(a, c, d);
+    INSERT INTO t1 VALUES(2, 999, 'x'), (5, 888, 'y');
+  }
+  set gen [string trimright "GENERATED ALWAYS AS (a*3) $kind"]
+  do_execsql_test 4.$tn.2 "
+    ALTER TABLE t1 COLUMN c ADD GENERATED ALWAYS AS (a*3) $kind;
+    SELECT sql FROM sqlite_schema WHERE name='t1';
+  " [list "CREATE TABLE t1(a, c $gen, d)"]
+  do_execsql_test 4.$tn.3 { SELECT a, c, d FROM t1 ORDER BY a } {2 6 x 5 15 y}
+  do_execsql_test 4.$tn.4 {
+    SELECT hidden FROM pragma_table_xinfo('t1') WHERE name='c'
+  } $hidden
+  do_execsql_test 4.$tn.5 { PRAGMA integrity_check } {ok}
+
+  # It is generated now: it may not be written to, and it follows "a".
+  do_catchsql_test 4.$tn.6 {
+    INSERT INTO t1(a, c, d) VALUES(7, 1, 'z');
+  } {1 {cannot INSERT into generated column "c"}}
+  do_execsql_test 4.$tn.7 {
+    INSERT INTO t1(a, d) VALUES(7, 'z');
+    UPDATE t1 SET a=10 WHERE a=2;
+    SELECT a, c FROM t1 ORDER BY a;
+  } {5 15 7 21 10 30}
+}
+
+# The two commands undo one another.
+#
+reset_db
+do_execsql_test 4.4.1 {
+  CREATE TABLE t1(a, c AS (a*3) STORED, d);
+  INSERT INTO t1(a,d) VALUES(2,'x');
+  ALTER TABLE t1 COLUMN c DROP GENERATED;
+  ALTER TABLE t1 COLUMN c ADD GENERATED ALWAYS AS (a*3) STORED;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a, c GENERATED ALWAYS AS (a*3) STORED, d)}}
+do_execsql_test 4.4.2 { SELECT a, c, d FROM t1 } {2 6 x}
+do_execsql_test 4.4.3 { PRAGMA integrity_check } {ok}
+
+#-------------------------------------------------------------------------
+# 5.*: refusals.  Nothing is changed by one.
+#
+reset_db
+do_execsql_test 5.0 { CREATE TABLE t1(a, c, d AS (a+1)) }
+
+do_catchsql_test 5.1 {
+  ALTER TABLE t1 COLUMN c DROP GENERATED;
+} {1 {column "c" is not a generated column}}
+
+do_catchsql_test 5.2 {
+  ALTER TABLE t1 COLUMN d ADD GENERATED ALWAYS AS (a+2);
+} {1 {column "d" is already a generated column}}
+
+do_catchsql_test 5.3 {
+  ALTER TABLE t1 COLUMN c ADD GENERATED ALWAYS AS (a+1) BOGUS;
+} {1 {expected STORED or VIRTUAL, got: BOGUS}}
+
+do_catchsql_test 5.4 {
+  ALTER TABLE t1 COLUMN zz DROP GENERATED;
+} {1 {no such column: zz}}
+
+do_catchsql_test 5.5 {
+  ALTER TABLE t1 COLUMN c ADD GENERATED ALWAYS AS (nosuch+1);
+} {1 {no such column: nosuch}}
+
+do_execsql_test 5.6 {
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a, c, d AS (a+1))}}
+
+# An INTEGER PRIMARY KEY is the rowid; a PRIMARY KEY column may not be
+# generated at all.
+reset_db
+do_catchsql_test 5.7 {
+  CREATE TABLE t1(a INTEGER PRIMARY KEY, c);
+  ALTER TABLE t1 COLUMN a ADD GENERATED ALWAYS AS (c+1);
+} {1 {cannot make column "a" generated: it holds the rowid}}
+reset_db
+do_catchsql_test 5.8 {
+  CREATE TABLE t1(a, c, PRIMARY KEY(c));
+  ALTER TABLE t1 COLUMN c ADD GENERATED ALWAYS AS (a+1);
+} {1 {cannot make column "c" generated: it is part of the PRIMARY KEY}}
+
+# A generated column carries no DEFAULT.
+reset_db
+do_catchsql_test 5.9 {
+  CREATE TABLE t1(a, c DEFAULT 5);
+  ALTER TABLE t1 COLUMN c ADD GENERATED ALWAYS AS (a+1);
+} {1 {cannot make column "c" generated: it has a default value}}
+
+# A table needs one column that is not generated.
+reset_db
+do_catchsql_test 5.10 {
+  CREATE TABLE t1(a);
+  ALTER TABLE t1 COLUMN a ADD GENERATED ALWAYS AS (1);
+} {1 {cannot make column "a" generated: table "t1" would have no ordinary column left}}
+reset_db
+do_catchsql_test 5.11 {
+  CREATE TABLE t1(a, c AS (a+1));
+  ALTER TABLE t1 COLUMN a ADD GENERATED ALWAYS AS (2);
+} {1 {cannot make column "a" generated: table "t1" would have no ordinary column left}}
+
+# Views have no constraints to edit, and sqlite_schema is not alterable.
+reset_db
+do_catchsql_test 5.12 {
+  CREATE VIEW v1 AS SELECT 1 AS x;
+  ALTER TABLE v1 COLUMN x DROP GENERATED;
+} {1 {cannot edit constraints of view "v1"}}
+do_catchsql_test 5.13 {
+  ALTER TABLE v1 COLUMN x ADD GENERATED ALWAYS AS (1);
+} {1 {cannot edit constraints of view "v1"}}
+do_catchsql_test 5.14 {
+  ALTER TABLE nosuchtable COLUMN c DROP GENERATED;
+} {1 {no such table: nosuchtable}}
+
+# A rebuild cannot run while another table's foreign key points here.
+reset_db
+do_catchsql_test 5.15 {
+  PRAGMA foreign_keys=ON;
+  CREATE TABLE t1(k PRIMARY KEY, c AS (k) VIRTUAL);
+  CREATE TABLE c1(x REFERENCES t1);
+  ALTER TABLE t1 COLUMN c DROP GENERATED;
+} {1 {cannot rebuild t1 while foreign keys are enabled: table c1 refers to it}}
+
+#-------------------------------------------------------------------------
+# 6.*: the other schemas, and ROLLBACK.
+#
+reset_db
+forcedelete test.db2
+do_execsql_test 6.0 {
+  ATTACH 'test.db2' AS aux;
+  CREATE TABLE aux.t1(a, c AS (a*3) VIRTUAL, d);
+  INSERT INTO aux.t1(a,d) VALUES(2,'x');
+  ALTER TABLE aux.t1 COLUMN c DROP GENERATED;
+  SELECT sql FROM aux.sqlite_schema WHERE name='t1';
+  SELECT a, c, d FROM aux.t1;
+} {{CREATE TABLE t1(a, c, d)} 2 6 x}
+do_execsql_test 6.1 { PRAGMA aux.integrity_check } {ok}
+do_execsql_test 6.2 { SELECT count(*) FROM main.sqlite_schema } {0}
+
+reset_db
+do_execsql_test 6.3 {
+  CREATE TEMP TABLE t1(a, c AS (a*3) STORED, d);
+  INSERT INTO t1(a,d) VALUES(2,'x');
+  ALTER TABLE t1 COLUMN c DROP GENERATED;
+  SELECT sql FROM sqlite_temp_schema WHERE name='t1';
+  SELECT a, c FROM t1;
+} {{CREATE TABLE t1(a, c, d)} 2 6}
+
+reset_db
+do_execsql_test 6.4 {
+  CREATE TABLE t1(a, c AS (a*3) VIRTUAL);
+  INSERT INTO t1(a) VALUES(2);
+  BEGIN;
+    ALTER TABLE t1 COLUMN c DROP GENERATED;
+  ROLLBACK;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a, c AS (a*3) VIRTUAL)}}
+do_execsql_test 6.5 { SELECT a, c FROM t1 } {2 6}
+
+reset_db
+do_execsql_test 6.6 {
+  CREATE TABLE t1(a, c, d);
+  INSERT INTO t1 VALUES(2, 9, 'x');
+  BEGIN;
+    ALTER TABLE t1 COLUMN c ADD GENERATED ALWAYS AS (a*3) STORED;
+  ROLLBACK;
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+  SELECT a, c, d FROM t1;
+} {{CREATE TABLE t1(a, c, d)} 2 9 x}
+
+#-------------------------------------------------------------------------
+# 7.*: an invalid stored statement is refused, and left alone.
+#
+reset_db
+do_execsql_test 7.0 {
+  CREATE TABLE t1(a, c AS (a*3) STORED);
+  PRAGMA writable_schema = 1;
+  UPDATE sqlite_schema SET sql = 'CREATE TABLE t1(a, c AS (a*3) STORED'
+   WHERE name = 't1';
+  PRAGMA writable_schema = 0;
+}
+do_catchsql_test 7.1 {
+  ALTER TABLE t1 COLUMN c DROP GENERATED;
+} {1 {malformed database schema (t1) - incomplete input}}
+do_execsql_test 7.2 {
+  PRAGMA writable_schema = 1;
+  SELECT sql FROM sqlite_schema WHERE type='table';
+} {{CREATE TABLE t1(a, c AS (a*3) STORED}}
+
+finish_test
