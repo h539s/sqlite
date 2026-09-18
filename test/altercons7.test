@@ -179,8 +179,8 @@ do_execsql_test 3.3 {
 
 #-------------------------------------------------------------------------
 # 4.*: a column with no DEFAULT is left alone rather than refused.  This
-# follows postgres, and matches what the named form of DROP CONSTRAINT
-# does with an INTEGER-typed argument.
+# follows postgres, and matches what DROP NOT NULL and the unnamed form of
+# DROP CHECK do when there is nothing of that kind to take off.
 #
 reset_db
 do_execsql_test 4.1 {

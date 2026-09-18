@@ -47,10 +47,10 @@ faultsim_save_and_close
 
 foreach {tn sql} {
   1 { ALTER TABLE x1 ADD CHECK (d!=1) }
-  2 { ALTER TABLE x1 ADD CONSTRAINT xyz CHECK (f>d+e); }
-  3 { ALTER TABLE x1 DROP CONSTRAINT abc }
-  4 { ALTER TABLE x1 ALTER f SET NOT NULL }
-  5 { ALTER TABLE x1 ALTER e DROP NOT NULL }
+  2 { ALTER TABLE x1 ADD CHECK xyz (f>d+e); }
+  3 { ALTER TABLE x1 DROP CHECK }
+  4 { ALTER TABLE x1 ALTER COLUMN f ADD NOT NULL }
+  5 { ALTER TABLE x1 ALTER COLUMN e DROP NOT NULL }
 } {
   do_faultsim_test 2.$tn -faults oom* -prep {
     faultsim_restore_and_reopen
@@ -67,11 +67,11 @@ do_faultsim_test 2.e -faults oom* -prep {
   faultsim_restore_and_reopen
 } -body {
   execsql {
-    ALTER TABLE x1 DROP CONSTRAINT nosuchconstraint
+    ALTER TABLE x1 DROP CHECK nosuchconstraint
   }
 } -test {
-  faultsim_test_result                           \
-      {1 {no such constraint: nosuchconstraint}} \
+  faultsim_test_result                                \
+      {1 {no such CHECK constraint: nosuchconstraint}} \
       {1 {SQL logic error}}
 }
 

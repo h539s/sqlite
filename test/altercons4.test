@@ -139,19 +139,19 @@ foreach {tn before col act after notnull} {
      {CREATE TABLE t1(a, b)}
      {00}
  27  {CREATE TABLE t1(a, b)}
-     a    {SET NOT NULL}
+     a    {ADD NOT NULL}
      {CREATE TABLE t1(a NOT NULL, b)}
      {10}
  28  {CREATE TABLE t1(a NOT NULL, b)}
-     a    {SET NOT NULL}
+     a    {ADD NOT NULL}
      {CREATE TABLE t1(a NOT NULL, b)}
      {10}
  29  {CREATE TABLE t1(a NOT NULL NOT NULL, b)}
-     a    {SET NOT NULL}
+     a    {ADD NOT NULL}
      {CREATE TABLE t1(a NOT NULL, b)}
      {10}
  30  {CREATE TABLE t1(a NOT NULL ON CONFLICT FAIL, b)}
-     a    {SET NOT NULL}
+     a    {ADD NOT NULL}
      {CREATE TABLE t1(a NOT NULL, b)}
      {10}
 } {
@@ -187,12 +187,12 @@ do_execsql_test 2.1 {
 } {{CREATE TABLE t1(a, b)}}
 
 #-------------------------------------------------------------------------
-# SET NOT NULL collapses any repeated clauses into the single new one.
+# ADD NOT NULL collapses any repeated clauses into the single new one.
 #
 reset_db
 do_execsql_test 3.0 {
   CREATE TABLE t1(a NOT NULL NOT NULL, b);
-  ALTER TABLE t1 ALTER COLUMN a SET NOT NULL;
+  ALTER TABLE t1 ALTER COLUMN a ADD NOT NULL;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a NOT NULL, b)}}
 
@@ -211,17 +211,18 @@ do_execsql_test 4.0 {
 } {{CREATE TABLE t1(a, b)}}
 
 #-------------------------------------------------------------------------
-# DROP CONSTRAINT by name is unchanged by all of the above.
+# A NOT NULL that carries a name leaves with its name, and is reached the
+# same way as one that has none: by the column it is written on.
 #
 reset_db
 do_execsql_test 5.0 {
   CREATE TABLE t1(a CONSTRAINT nn NOT NULL, b);
-  ALTER TABLE t1 DROP CONSTRAINT nn;
+  ALTER TABLE t1 ALTER COLUMN a DROP NOT NULL;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a, b)}}
 
 do_catchsql_test 5.1 {
-  ALTER TABLE t1 DROP CONSTRAINT nosuch;
-} {1 {no such constraint: nosuch}}
+  ALTER TABLE t1 ALTER COLUMN nosuch DROP NOT NULL;
+} {1 {no such column: nosuch}}
 
 finish_test

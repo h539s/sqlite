@@ -117,7 +117,7 @@ do_auth_test 1.3 {
 }
 
 do_auth_test 1.4 {
-  ALTER TABLE t2 ALTER COLUMN b SET NOT NULL;
+  ALTER TABLE t2 ALTER COLUMN b ADD NOT NULL;
 } {
   {SQLITE_ALTER_TABLE main t2 b {}} 
   {SQLITE_FUNCTION {} sqlite_drop_colcons {} {}} 
@@ -142,7 +142,7 @@ do_auth_test 1.5 {
 }
 
 do_auth_test 1.6 {
-  ALTER TABLE t2 ADD CONSTRAINT abc CHECK (aaa>b)
+  ALTER TABLE t2 ADD CHECK abc (aaa>b)
 } {
   {SQLITE_ALTER_TABLE main t2 {} {}} 
   {SQLITE_FUNCTION {} sqlite_fail {} {}} 
@@ -157,17 +157,17 @@ do_auth_test 1.6 {
   {SQLITE_UPDATE sqlite_master sql main {}}
 }
 do_auth_test 1.7 {
-  ALTER TABLE t2 DROP CONSTRAINT abc;
+  ALTER TABLE t2 DROP CHECK abc;
 } {
   {SQLITE_ALTER_TABLE main t2 {} {}}
-  {SQLITE_FUNCTION {} sqlite_drop_constraint {} {}}
+  {SQLITE_FUNCTION {} sqlite_drop_check {} {}}
   {SQLITE_READ sqlite_master sql main {}}
   {SQLITE_READ sqlite_master tbl_name main {}}
   {SQLITE_READ sqlite_master type main {}}
   {SQLITE_UPDATE sqlite_master sql main {}}
 }
 
-# 1.8-1.11: the commands that name a column raise SQLITE_ALTER_TABLE once,
+# 1.8-1.9 and 1.11: the commands that name a column raise SQLITE_ALTER_TABLE once,
 # with the column name in it - never a second time with the column left
 # empty.  A command that names a column reports one change, so the
 # authorizer has to see one callback for it.
@@ -192,14 +192,21 @@ do_auth_test 1.9 {
   {SQLITE_READ sqlite_master type main {}}
   {SQLITE_UPDATE sqlite_master sql main {}}
 }
+# Dropping a UNIQUE takes away the index that went with it, so this one
+# also reports what DROP INDEX reports.
+execsql { ALTER TABLE t2 ADD UNIQUE(aaa) }
 do_auth_test 1.10 {
-  ALTER TABLE t2 COLUMN b DROP CHECK;
+  ALTER TABLE t2 DROP UNIQUE(aaa);
 } {
-  {SQLITE_ALTER_TABLE main t2 b {}}
-  {SQLITE_FUNCTION {} sqlite_drop_colcons {} {}}
+  {SQLITE_ALTER_TABLE main t2 {} {}}
+  {SQLITE_DELETE sqlite_master {} main {}}
+  {SQLITE_FUNCTION {} sqlite_drop_unique {} {}}
+  {SQLITE_READ sqlite_master name main {}}
+  {SQLITE_READ sqlite_master rootpage main {}}
   {SQLITE_READ sqlite_master sql main {}}
   {SQLITE_READ sqlite_master tbl_name main {}}
   {SQLITE_READ sqlite_master type main {}}
+  {SQLITE_UPDATE sqlite_master rootpage main {}}
   {SQLITE_UPDATE sqlite_master sql main {}}
 }
 # BLOB is the affinity an untyped column already has, so this one is a

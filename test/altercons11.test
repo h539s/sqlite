@@ -1,0 +1,303 @@
+# 2026 September 18
+#
+# The author disclaims copyright to this source code.  In place of
+# a legal notice, here is a blessing:
+#
+#    May you do good and not evil.
+#    May you find forgiveness for yourself and forgive others.
+#    May you share freely, never taking more than you give.
+#
+#*************************************************************************
+#
+# Tests for
+#
+#   ALTER TABLE <table> DROP UNIQUE(<columns>)
+#
+# A UNIQUE need not have a name, so it is asked for by what it says: the
+# columns it covers, in the order it covers them.  One written on a column
+# and one written at table level say the same thing, so either answers to
+# the same request, and a name attached to one makes no difference to it.
+#
+# Unlike a FOREIGN KEY, a UNIQUE is not text alone: each one has an
+# automatic index beside the rows.  So the b-trees go with the clauses, and
+# the automatic indexes that outlive them are renumbered - their names are
+# "sqlite_autoindex_<table>_<n>", numbered by the order the constraints
+# appear in the CREATE TABLE, and the reparse numbers them afresh.
+#
+
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+set testprefix altercons11
+
+# If SQLITE_OMIT_ALTERTABLE is defined, omit this file.
+ifcapable !altertable {
+  finish_test
+  return
+}
+
+#-------------------------------------------------------------------------
+# 1.*: the clause goes, whichever way it was written, and the table that is
+# left is the one that would have been created without it.
+#
+foreach {tn cols before after} {
+  1 {a} { CREATE TABLE t1(a UNIQUE, b) }
+        { CREATE TABLE t1(a, b) }
+
+  2 {a} { CREATE TABLE t1(a, b, UNIQUE(a)) }
+        { CREATE TABLE t1(a, b) }
+
+  3 {a,b} { CREATE TABLE t1(a, b, UNIQUE(a,b)) }
+          { CREATE TABLE t1(a, b) }
+
+  4 {a} { CREATE TABLE t1(a CONSTRAINT u UNIQUE, b) }
+        { CREATE TABLE t1(a, b) }
+
+  5 {a} { CREATE TABLE t1(a, b, CONSTRAINT u UNIQUE(a)) }
+        { CREATE TABLE t1(a, b) }
+
+  6 {a} { CREATE TABLE t1(a, b, UNIQUE(a) ON CONFLICT REPLACE) }
+        { CREATE TABLE t1(a, b) }
+
+  7 {a} { CREATE TABLE t1(a UNIQUE, b UNIQUE) }
+        { CREATE TABLE t1(a, b UNIQUE) }
+
+  8 {b} { CREATE TABLE t1(a UNIQUE, b UNIQUE) }
+        { CREATE TABLE t1(a UNIQUE, b) }
+
+  9 {a} { CREATE TABLE t1(a, b, UNIQUE(a), UNIQUE(b)) }
+        { CREATE TABLE t1(a, b, UNIQUE(b)) }
+
+ 10 {a} { CREATE TABLE t1(a, b, CHECK(a>0), UNIQUE(a)) }
+        { CREATE TABLE t1(a, b, CHECK(a>0)) }
+
+ 11 {a} { CREATE TABLE t1(a UNIQUE NOT NULL, b) }
+        { CREATE TABLE t1(a NOT NULL, b) }
+
+ 12 {a} { CREATE TABLE t1(a, b, UNIQUE(a COLLATE nocase)) }
+        { CREATE TABLE t1(a, b) }
+
+ 13 {a} { CREATE TABLE t1(a UNIQUE, b, UNIQUE(a)) }
+        { CREATE TABLE t1(a, b) }
+} {
+  # No column, and no other constraint, may be lost along the way.
+  set probe {
+    SELECT cid, name, type, "notnull", coalesce(dflt_value,'~'), pk
+      FROM pragma_table_info('t1');
+    SELECT name, "unique", origin FROM pragma_index_list('t1') ORDER BY name;
+  }
+  reset_db
+  execsql $after
+  set ref [execsql $probe]
+
+  reset_db
+  do_execsql_test 1.$tn.1 $before
+  do_execsql_test 1.$tn.2 "
+    ALTER TABLE t1 DROP UNIQUE($cols);
+    SELECT sql FROM sqlite_schema WHERE name='t1';
+  " [list [string trim $after]]
+  do_execsql_test 1.$tn.3 $probe $ref
+  do_execsql_test 1.$tn.4 { PRAGMA integrity_check } {ok}
+}
+
+#-------------------------------------------------------------------------
+# 2.*: the columns are matched in the order they were written, and a
+# collation or a sort order attached to one of them is not part of what
+# says which constraint this is.
+#
+reset_db
+do_execsql_test 2.0 {
+  CREATE TABLE t1(a, b, UNIQUE(a,b));
+}
+do_catchsql_test 2.1 {
+  ALTER TABLE t1 DROP UNIQUE(b,a);
+} {1 {table "t1" has no such UNIQUE constraint}}
+do_catchsql_test 2.2 {
+  ALTER TABLE t1 DROP UNIQUE(a);
+} {1 {table "t1" has no such UNIQUE constraint}}
+do_execsql_test 2.3 {
+  ALTER TABLE t1 DROP UNIQUE(a,b);
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a, b)}}
+
+reset_db
+do_execsql_test 2.4 {
+  CREATE TABLE t1(a, b, UNIQUE(a COLLATE nocase DESC));
+  ALTER TABLE t1 DROP UNIQUE(a);
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a, b)}}
+
+# Two constraints that say the same thing both go.
+#
+reset_db
+do_execsql_test 2.5 {
+  CREATE TABLE t1(a UNIQUE, b, UNIQUE(a));
+  ALTER TABLE t1 DROP UNIQUE(a);
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a, b)}}
+do_execsql_test 2.6 {
+  SELECT count(*) FROM sqlite_schema WHERE type='index';
+} {0}
+
+#-------------------------------------------------------------------------
+# 3.*: the index goes with the clause, and the automatic indexes left
+# behind are renumbered so that they match what a reparse expects.
+#
+reset_db
+do_execsql_test 3.0 {
+  CREATE TABLE t1(a UNIQUE, b UNIQUE, c UNIQUE);
+  INSERT INTO t1 VALUES(1,1,1),(2,2,2);
+  ALTER TABLE t1 DROP UNIQUE(a);
+  SELECT name FROM sqlite_schema WHERE type='index' ORDER BY name;
+} {sqlite_autoindex_t1_1 sqlite_autoindex_t1_2}
+do_execsql_test 3.1 {
+  SELECT il.name, ii.name
+    FROM pragma_index_list('t1') il, pragma_index_info(il.name) ii
+   ORDER BY il.name;
+} {sqlite_autoindex_t1_1 b sqlite_autoindex_t1_2 c}
+do_execsql_test 3.2 { PRAGMA integrity_check } {ok}
+
+# The constraint that went no longer bites; the ones that stayed still do.
+do_execsql_test 3.3 {
+  INSERT INTO t1 VALUES(1,3,3);
+  SELECT count(*) FROM t1;
+} {3}
+do_catchsql_test 3.4 {
+  INSERT INTO t1 VALUES(9,1,9);
+} {1 {UNIQUE constraint failed: t1.b}}
+
+# A PRIMARY KEY takes a number in the same sequence, so dropping a UNIQUE
+# written before it moves it down.
+reset_db
+do_execsql_test 3.5 {
+  CREATE TABLE t1(a TEXT UNIQUE, b TEXT, PRIMARY KEY(b));
+  ALTER TABLE t1 DROP UNIQUE(a);
+  SELECT name, origin FROM pragma_index_list('t1') ORDER BY name;
+} {sqlite_autoindex_t1_1 pk}
+do_execsql_test 3.6 { PRAGMA integrity_check } {ok}
+
+# An index made by CREATE INDEX has no number and is left alone.
+reset_db
+do_execsql_test 3.7 {
+  CREATE TABLE t1(a UNIQUE, b UNIQUE, c);
+  CREATE INDEX ix ON t1(c);
+  ALTER TABLE t1 DROP UNIQUE(a);
+  SELECT type, name FROM sqlite_schema ORDER BY name;
+} {index ix index sqlite_autoindex_t1_1 table t1}
+do_execsql_test 3.8 { PRAGMA integrity_check } {ok}
+
+#-------------------------------------------------------------------------
+# 4.*: what is left is indistinguishable from a table created that way.
+#
+reset_db
+do_execsql_test 4.0 {
+  CREATE TABLE t2(a,b,c, UNIQUE(a), UNIQUE(c));
+  ALTER TABLE t2 DROP UNIQUE(a);
+  CREATE TABLE t3(a,b,c, UNIQUE(c));
+  SELECT (SELECT replace(sql,'t2','X') FROM sqlite_schema WHERE name='t2')
+      == (SELECT replace(sql,'t3','X') FROM sqlite_schema WHERE name='t3');
+} {1}
+
+#-------------------------------------------------------------------------
+# 5.*: refusals.  Nothing is changed by one.
+#
+reset_db
+do_execsql_test 5.0 { CREATE TABLE t1(a UNIQUE, b) }
+
+do_catchsql_test 5.1 {
+  ALTER TABLE t1 DROP UNIQUE(b);
+} {1 {table "t1" has no such UNIQUE constraint}}
+do_execsql_test 5.2 {
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a UNIQUE, b)}}
+
+do_catchsql_test 5.3 {
+  ALTER TABLE t1 DROP UNIQUE(zz);
+} {1 {table "t1" has no such UNIQUE constraint}}
+
+# The column list says which constraint, and nothing else does, so there is
+# nowhere in it to write a collation or a sort order.
+do_catchsql_test 5.3.1 {
+  ALTER TABLE t1 DROP UNIQUE(a COLLATE nocase);
+} {1 {syntax error after column name "a"}}
+do_catchsql_test 5.3.2 {
+  ALTER TABLE t1 DROP UNIQUE(a DESC);
+} {1 {syntax error after column name "a"}}
+
+# A PRIMARY KEY is not a UNIQUE, whichever way it is written.
+reset_db
+do_execsql_test 5.4 { CREATE TABLE t1(a TEXT PRIMARY KEY, b) }
+do_catchsql_test 5.5 {
+  ALTER TABLE t1 DROP UNIQUE(a);
+} {1 {table "t1" has no such UNIQUE constraint}}
+do_execsql_test 5.6 {
+  SELECT name, origin FROM pragma_index_list('t1');
+} {sqlite_autoindex_t1_1 pk}
+
+do_catchsql_test 5.7 {
+  CREATE VIEW v1 AS SELECT 1 AS a;
+  ALTER TABLE v1 DROP UNIQUE(a);
+} {1 {cannot edit constraints of view "v1"}}
+
+do_catchsql_test 5.8 {
+  ALTER TABLE nosuchtable DROP UNIQUE(a);
+} {1 {no such table: nosuchtable}}
+
+do_catchsql_test 5.9 {
+  ALTER TABLE sqlite_schema DROP UNIQUE(name);
+} {1 {table sqlite_master may not be altered}}
+
+#-------------------------------------------------------------------------
+# 6.*: the other schemas, and ROLLBACK.
+#
+reset_db
+forcedelete test.db2
+do_execsql_test 6.0 {
+  ATTACH 'test.db2' AS aux;
+  CREATE TABLE aux.t1(a UNIQUE, b);
+  INSERT INTO aux.t1 VALUES(1,2);
+  ALTER TABLE aux.t1 DROP UNIQUE(a);
+  SELECT sql FROM aux.sqlite_schema WHERE name='t1';
+  SELECT a FROM aux.t1;
+} {{CREATE TABLE t1(a, b)} 1}
+do_execsql_test 6.1 { PRAGMA aux.integrity_check } {ok}
+do_execsql_test 6.2 { SELECT count(*) FROM main.sqlite_schema } {0}
+
+reset_db
+do_execsql_test 6.3 {
+  CREATE TEMP TABLE t1(a UNIQUE, b);
+  ALTER TABLE t1 DROP UNIQUE(a);
+  SELECT type, name FROM sqlite_temp_schema ORDER BY name;
+} {table t1}
+
+reset_db
+do_execsql_test 6.4 {
+  CREATE TABLE t1(a UNIQUE, b);
+  BEGIN;
+    ALTER TABLE t1 DROP UNIQUE(a);
+  ROLLBACK;
+  SELECT type, name FROM sqlite_schema ORDER BY name;
+} {index sqlite_autoindex_t1_1 table t1}
+do_execsql_test 6.5 {
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a UNIQUE, b)}}
+
+#-------------------------------------------------------------------------
+# 7.*: an invalid stored statement is refused, and left alone.
+#
+reset_db
+do_execsql_test 7.0 {
+  CREATE TABLE t1(a UNIQUE, b);
+  PRAGMA writable_schema = 1;
+  UPDATE sqlite_schema SET sql = 'CREATE TABLE t1(a UNIQUE, b'
+   WHERE name = 't1';
+  PRAGMA writable_schema = 0;
+}
+do_catchsql_test 7.1 {
+  ALTER TABLE t1 DROP UNIQUE(a);
+} {1 {malformed database schema (t1) - incomplete input}}
+do_execsql_test 7.2 {
+  PRAGMA writable_schema = 1;
+  SELECT sql FROM sqlite_schema WHERE type='table';
+} {{CREATE TABLE t1(a UNIQUE, b}}
+
+finish_test

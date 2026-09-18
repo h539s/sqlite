@@ -650,8 +650,8 @@ do_execsql_test 12.3 {
 } {1 55 2 66 3 77 ok}
 ifcapable altertable {
   do_execsql_test 12.4 {
-    ALTER TABLE src DROP CONSTRAINT c1;
-    ALTER TABLE dest DROP CONSTRAINT c2;
+    ALTER TABLE src DROP CHECK c1;
+    ALTER TABLE dest DROP CHECK c2;
   }
   set sqlite3_xferopt_count 0
   do_catchsql_test 12.5 {

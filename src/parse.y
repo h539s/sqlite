@@ -434,8 +434,10 @@ ccons ::= PRIMARY(P) KEY sortorder(Z) onconf(R) autoinc(I). {
     sqlite3ConsLocAdd(pParse, PARSELOC_PrimaryKey, -1, P.z, &P.z[P.n]);
   }
 }
-ccons ::= UNIQUE onconf(R).      {sqlite3CreateIndex(pParse,0,0,0,0,R,0,0,0,0,
-                                   SQLITE_IDXTYPE_UNIQUE);}
+ccons ::= UNIQUE(U) onconf(R). {
+  sqlite3CreateIndex(pParse,0,0,0,0,R,0,0,0,0, SQLITE_IDXTYPE_UNIQUE);
+  if( IN_RENAME_OBJECT ) sqlite3UniqueLocAdd(pParse, &U, 0);
+}
 ccons ::= CHECK(C) LP(A) expr(X) RP(B). {
   sqlite3AddCheckConstraint(pParse,X,A.z,B.z);
   if( IN_RENAME_OBJECT ) sqlite3ColConsLocAdd(pParse, PARSELOC_Check, &C, 1);
@@ -503,9 +505,10 @@ tcons ::= PRIMARY(P) KEY LP sortlist(X) autoinc(I) RP onconf(R). {
     sqlite3ConsLocAdd(pParse, PARSELOC_PrimaryKey, -1, P.z, &P.z[P.n]);
   }
 }
-tcons ::= UNIQUE LP sortlist(X) RP onconf(R).
-                                 {sqlite3CreateIndex(pParse,0,0,0,X,R,0,0,0,0,
-                                       SQLITE_IDXTYPE_UNIQUE);}
+tcons ::= UNIQUE(U) LP sortlist(X) RP onconf(R). {
+  if( IN_RENAME_OBJECT ) sqlite3UniqueLocAdd(pParse, &U, X);
+  sqlite3CreateIndex(pParse,0,0,0,X,R,0,0,0,0, SQLITE_IDXTYPE_UNIQUE);
+}
 tcons ::= CHECK(C) LP(A) expr(E) RP(B) onconf. {
   sqlite3AddCheckConstraint(pParse,E,A.z,B.z);
   if( IN_RENAME_OBJECT ) sqlite3ColConsLocAdd(pParse, PARSELOC_Check, &C, 0);
@@ -1942,36 +1945,36 @@ cmd ::= ALTER TABLE fullname(X) DROP kwcolumn_opt nm(Y). {
 cmd ::= ALTER TABLE fullname(X) RENAME kwcolumn_opt nm(Y) TO nm(Z). {
   sqlite3AlterRenameColumn(pParse, X, &Y, &Z);
 }
-cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT nm(Y). {
-  sqlite3AlterDropConstraint(pParse, X, &Y, 0, 0);
-}
-cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT PRIMARY KEY. {
+cmd ::= ALTER TABLE fullname(X) DROP PRIMARY KEY. {
   sqlite3AlterDropPrimaryKey(pParse, X);
 }
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) DROP DEFAULT. {
-  sqlite3AlterDropConstraint(pParse, X, 0, &Y, PARSELOC_Default);
+  sqlite3AlterDropConstraint(pParse, X, &Y, PARSELOC_Default);
 }
 cmd ::= ALTER TABLE fullname(X) DROP FOREIGN KEY LP eidlist(F) RP
         REFERENCES nm(T) eidlist_opt(TA). {
   sqlite3AlterDropForeignKey(pParse, X, F, &T, TA);
 }
+cmd ::= ALTER TABLE fullname(X) DROP UNIQUE LP eidlist(F) RP. {
+  sqlite3AlterDropUnique(pParse, X, F);
+}
 cmd ::= ALTER TABLE fullname(X) DROP CHECK. {
-  sqlite3AlterDropCheck(pParse, X);
+  sqlite3AlterDropCheck(pParse, X, 0);
 }
-cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) DROP CHECK. {
-  sqlite3AlterDropConstraint(pParse, X, 0, &Y, PARSELOC_Check);
+cmd ::= ALTER TABLE fullname(X) DROP CHECK nm(Y). {
+  sqlite3AlterDropCheck(pParse, X, &Y);
 }
-cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) DROP NOT NULL. {
-  sqlite3AlterDropConstraint(pParse, X, 0, &Y, PARSELOC_NotNull);
+cmd ::= ALTER TABLE fullname(X) ALTER COLUMNKW nm(Y) DROP NOT NULL. {
+  sqlite3AlterDropConstraint(pParse, X, &Y, PARSELOC_NotNull);
 }
-cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) SET NOT(Z) NULL onconf. {
-  sqlite3AlterSetNotNull(pParse, X, &Y, &Z);
-}
-cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(Y) nm(Z) CHECK LP(A) expr(E) RP(B) onconf. {
-  sqlite3AlterAddConstraint(pParse, X, &Y, &Z, A.z+1, (B.z-A.z-1), E);
+cmd ::= ALTER TABLE fullname(X) ALTER COLUMNKW nm(Y) ADD NOT(Z) NULL onconf. {
+  sqlite3AlterAddNotNull(pParse, X, &Y, &Z);
 }
 cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) LP(A) expr(E) RP(B) onconf. {
-  sqlite3AlterAddConstraint(pParse, X, &Y, 0, A.z+1, (B.z-A.z-1), E);
+  sqlite3AlterAddCheck(pParse, X, &Y, 0, &A, A.z+1, (B.z-A.z-1), E);
+}
+cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) nm(N) LP(A) expr(E) RP(B) onconf. {
+  sqlite3AlterAddCheck(pParse, X, &Y, &N, &A, A.z+1, (B.z-A.z-1), E);
 }
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) SET TYPE typetoken(Z). {
   sqlite3AlterSetColumnType(pParse, X, &Y, &Z);
@@ -1998,31 +2001,28 @@ onoff(A) ::= nm(X). {
   }
 }
 
-cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N)
-        UNIQUE LP(A) sortlist(L) RP(B) onconf. {
-  sqlite3AlterAddNamedConstraint(pParse, X, &K, &N, ALTERCONS_Unique,
+cmd ::= ALTER TABLE fullname(X) ADD UNIQUE(K) LP(A) sortlist(L) RP(B) onconf. {
+  sqlite3AlterAddTableConstraint(pParse, X, &K, ALTERCONS_Unique,
                                  L, A.z+1, (int)(B.z-A.z-1));
 }
-cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N)
-        PRIMARY KEY LP(A) sortlist(L) autoinc(I) RP(B) onconf. {
+cmd ::= ALTER TABLE fullname(X) ADD PRIMARY(K) KEY
+        LP(A) sortlist(L) autoinc(I) RP(B) onconf. {
   if( I ){
     sqlite3ErrorMsg(pParse, "AUTOINCREMENT is only allowed on an "
                             "INTEGER PRIMARY KEY");
     sqlite3ExprListDelete(pParse->db, L);
     sqlite3SrcListDelete(pParse->db, X);
   }else{
-    sqlite3AlterAddNamedConstraint(pParse, X, &K, &N, ALTERCONS_PrimaryKey,
+    sqlite3AlterAddTableConstraint(pParse, X, &K, ALTERCONS_PrimaryKey,
                                    L, A.z+1, (int)(B.z-A.z-1));
   }
 }
-cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(K) nm(N)
-        FOREIGN KEY LP eidlist(FA) RP
+cmd ::= ALTER TABLE fullname(X) ADD FOREIGN(K) KEY LP eidlist(FA) RP
         REFERENCES nm(T) eidlist_opt(TA) refargs defer_subclause_opt. {
   sqlite3ExprListDelete(pParse->db, FA);
   sqlite3ExprListDelete(pParse->db, TA);
   (void)T;
-  sqlite3AlterAddNamedConstraint(pParse, X, &K, &N, ALTERCONS_ForeignKey,
-                                 0, 0, 0);
+  sqlite3AlterAddTableConstraint(pParse, X, &K, ALTERCONS_ForeignKey, 0, 0, 0);
 }
 
 cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(C) ADD DEFAULT scantok(A) term(E). {

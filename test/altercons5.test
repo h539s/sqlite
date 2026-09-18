@@ -9,16 +9,18 @@
 #
 #*************************************************************************
 #
-# Tests for ALTER TABLE <table> ADD CONSTRAINT <name> ...
+# Tests for the ALTER TABLE forms that add a constraint:
 #
-#   ADD CONSTRAINT n UNIQUE(...)
-#   ADD CONSTRAINT n PRIMARY KEY(...)
-#   ADD CONSTRAINT n FOREIGN KEY(...) REFERENCES ...
+#   ADD UNIQUE(...)
+#   ADD PRIMARY KEY(...)
+#   ADD FOREIGN KEY(...) REFERENCES ...
 #   COLUMN <column> ADD DEFAULT <value>
 #
-# The name is required in the ADD CONSTRAINT forms, which all become
-# table-constraints.  A DEFAULT belongs to one column rather than to the
-# table, so it names the column instead and carries no name of its own.
+# None of them takes a name.  The first three become table-constraints and
+# are reached again by what they say - the columns of a UNIQUE, the shape of
+# a FOREIGN KEY, and, for a PRIMARY KEY, there being only one.  A DEFAULT
+# belongs to one column rather than to the table, so it names the column
+# instead.
 #
 # What is stored is the text as written, spliced in at a position the
 # parser recorded rather than one found by scanning.  UNIQUE and PRIMARY
@@ -44,9 +46,9 @@ reset_db
 do_execsql_test 1.0 {
   CREATE TABLE t1(a INT, b TEXT);
   INSERT INTO t1 VALUES(1,'x'),(2,'y');
-  ALTER TABLE t1 ADD CONSTRAINT u1 UNIQUE(a);
+  ALTER TABLE t1 ADD UNIQUE(a);
   SELECT type, name, coalesce(sql,'-') FROM sqlite_schema ORDER BY name;
-} {index sqlite_autoindex_t1_1 - table t1 {CREATE TABLE t1(a INT, b TEXT, CONSTRAINT u1 UNIQUE(a))}}
+} {index sqlite_autoindex_t1_1 - table t1 {CREATE TABLE t1(a INT, b TEXT, UNIQUE(a))}}
 do_execsql_test 1.1 {
   SELECT name, "unique", origin FROM pragma_index_list('t1');
 } {sqlite_autoindex_t1_1 1 u}
@@ -62,9 +64,9 @@ do_catchsql_test 1.4 {
 reset_db
 do_execsql_test 1.5 {
   CREATE TABLE t1(a,b,c);
-  ALTER TABLE t1 ADD CONSTRAINT u1 UNIQUE(a, b COLLATE nocase DESC);
+  ALTER TABLE t1 ADD UNIQUE(a, b COLLATE nocase DESC);
   SELECT sql FROM sqlite_schema WHERE type='table';
-} {{CREATE TABLE t1(a,b,c, CONSTRAINT u1 UNIQUE(a, b COLLATE nocase DESC))}}
+} {{CREATE TABLE t1(a,b,c, UNIQUE(a, b COLLATE nocase DESC))}}
 do_execsql_test 1.6 {
   SELECT il.name, ii.seqno, ii.name
     FROM pragma_index_list('t1') il, pragma_index_info(il.name) ii;
@@ -76,7 +78,7 @@ reset_db
 do_execsql_test 1.7 {
   CREATE TABLE t1(a TEXT UNIQUE, b INT, c);
   CREATE INDEX ix ON t1(c);
-  ALTER TABLE t1 ADD CONSTRAINT u2 UNIQUE(b);
+  ALTER TABLE t1 ADD UNIQUE(b);
   SELECT type, name FROM sqlite_schema ORDER BY name;
 } {index ix index sqlite_autoindex_t1_1 index sqlite_autoindex_t1_2 table t1}
 do_execsql_test 1.8 { PRAGMA integrity_check } {ok}
@@ -88,9 +90,9 @@ reset_db
 do_execsql_test 2.0 {
   CREATE TABLE t1(a TEXT, b INT);
   INSERT INTO t1 VALUES('k',1);
-  ALTER TABLE t1 ADD CONSTRAINT p1 PRIMARY KEY(a);
+  ALTER TABLE t1 ADD PRIMARY KEY(a);
   SELECT type, name, coalesce(sql,'-') FROM sqlite_schema ORDER BY name;
-} {index sqlite_autoindex_t1_1 - table t1 {CREATE TABLE t1(a TEXT, b INT, CONSTRAINT p1 PRIMARY KEY(a))}}
+} {index sqlite_autoindex_t1_1 - table t1 {CREATE TABLE t1(a TEXT, b INT, PRIMARY KEY(a))}}
 do_execsql_test 2.1 {
   SELECT name, pk FROM pragma_table_info('t1');
 } {a 1 b 0}
@@ -109,7 +111,7 @@ reset_db
 do_execsql_test 2.5 {
   CREATE TABLE t1(a INT PRIMARY KEY, b) WITHOUT ROWID;
   INSERT INTO t1 VALUES(1,'x');
-  ALTER TABLE t1 ADD CONSTRAINT u1 UNIQUE(b);
+  ALTER TABLE t1 ADD UNIQUE(b);
   SELECT name, origin FROM pragma_index_list('t1') ORDER BY name;
 } {sqlite_autoindex_t1_1 pk sqlite_autoindex_t1_2 u}
 do_execsql_test 2.6 { PRAGMA integrity_check } {ok}
@@ -119,7 +121,7 @@ reset_db
 do_execsql_test 2.7 {
   CREATE TABLE t1(a TEXT, b INT) STRICT;
   INSERT INTO t1 VALUES('k',1);
-  ALTER TABLE t1 ADD CONSTRAINT p1 PRIMARY KEY(a);
+  ALTER TABLE t1 ADD PRIMARY KEY(a);
   SELECT name, "notnull", pk FROM pragma_table_info('t1');
 } {a 1 1 b 0 0}
 do_execsql_test 2.8 { PRAGMA integrity_check } {ok}
@@ -131,9 +133,9 @@ reset_db
 do_execsql_test 3.0 {
   CREATE TABLE p1(k INT PRIMARY KEY);
   CREATE TABLE c1(x INT, y);
-  ALTER TABLE c1 ADD CONSTRAINT f1 FOREIGN KEY(x) REFERENCES p1(k) ON DELETE CASCADE;
+  ALTER TABLE c1 ADD FOREIGN KEY(x) REFERENCES p1(k) ON DELETE CASCADE;
   SELECT sql FROM sqlite_schema WHERE name='c1';
-} {{CREATE TABLE c1(x INT, y, CONSTRAINT f1 FOREIGN KEY(x) REFERENCES p1(k) ON DELETE CASCADE)}}
+} {{CREATE TABLE c1(x INT, y, FOREIGN KEY(x) REFERENCES p1(k) ON DELETE CASCADE)}}
 do_execsql_test 3.1 {
   SELECT id, seq, "table", "from", "to", on_delete
     FROM pragma_foreign_key_list('c1');
@@ -152,8 +154,8 @@ do_execsql_test 3.3 {
   INSERT INTO c1 VALUES(99);
 }
 do_catchsql_test 3.4 {
-  ALTER TABLE c1 ADD CONSTRAINT f1 FOREIGN KEY(x) REFERENCES p1(k);
-} {1 {foreign key constraint f1 on c1 failed}}
+  ALTER TABLE c1 ADD FOREIGN KEY(x) REFERENCES p1(k);
+} {1 {foreign key constraint on c1 failed}}
 do_execsql_test 3.5 {
   SELECT sql FROM sqlite_schema WHERE name='c1';
 } {{CREATE TABLE c1(x)}}
@@ -166,9 +168,9 @@ do_execsql_test 3.6 {
   CREATE TABLE p1(k INT PRIMARY KEY);
   CREATE TABLE c1(x);
   INSERT INTO c1 VALUES(99);
-  ALTER TABLE c1 ADD CONSTRAINT f1 FOREIGN KEY(x) REFERENCES p1(k);
+  ALTER TABLE c1 ADD FOREIGN KEY(x) REFERENCES p1(k);
   SELECT sql FROM sqlite_schema WHERE name='c1';
-} {{CREATE TABLE c1(x, CONSTRAINT f1 FOREIGN KEY(x) REFERENCES p1(k))}}
+} {{CREATE TABLE c1(x, FOREIGN KEY(x) REFERENCES p1(k))}}
 
 #-------------------------------------------------------------------------
 # DEFAULT.  The five forms a CREATE TABLE accepts, and no more.
@@ -211,29 +213,27 @@ do_execsql_test 4.4 {
 reset_db
 do_execsql_test 5.0 {
   CREATE TABLE t2(a,b);
-  ALTER TABLE t2 ADD CONSTRAINT n UNIQUE(a);
-  CREATE TABLE t3(a,b, CONSTRAINT n UNIQUE(a));
+  ALTER TABLE t2 ADD UNIQUE(a);
+  CREATE TABLE t3(a,b, UNIQUE(a));
   SELECT (SELECT replace(sql,'t2','X') FROM sqlite_schema WHERE name='t2')
       == (SELECT replace(sql,'t3','X') FROM sqlite_schema WHERE name='t3');
 } {1}
 
-# DROP CONSTRAINT refuses to take a UNIQUE or PRIMARY KEY off a table, and
-# refuses it just the same whichever way the constraint got there.
-do_catchsql_test 5.1 {
-  ALTER TABLE t2 DROP CONSTRAINT n;
-} {1 {constraint may not be dropped: n}}
-do_catchsql_test 5.2 {
-  ALTER TABLE t3 DROP CONSTRAINT n;
-} {1 {constraint may not be dropped: n}}
+# And it comes off again the same way, whichever way it got there.
+do_execsql_test 5.1 {
+  ALTER TABLE t2 DROP UNIQUE(a);
+  ALTER TABLE t3 DROP UNIQUE(a);
+  SELECT sql FROM sqlite_schema ORDER BY name;
+} {{CREATE TABLE t2(a,b)} {CREATE TABLE t3(a,b)}}
 
-# A CHECK or a FOREIGN KEY does come off again, giving back the statement
-# the table started with.
+# A FOREIGN KEY does the same, giving back the statement the table started
+# with.
 reset_db
 do_execsql_test 5.3 {
   CREATE TABLE p1(k INT PRIMARY KEY);
   CREATE TABLE t1(a, b);
-  ALTER TABLE t1 ADD CONSTRAINT f1 FOREIGN KEY(a) REFERENCES p1(k);
-  ALTER TABLE t1 DROP CONSTRAINT f1;
+  ALTER TABLE t1 ADD FOREIGN KEY(a) REFERENCES p1(k);
+  ALTER TABLE t1 DROP FOREIGN KEY(a) REFERENCES p1(k);
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a, b)}}
 
@@ -243,7 +243,7 @@ do_execsql_test 5.3 {
 reset_db
 do_catchsql_test 6.0 {
   CREATE TABLE t1(a INTEGER, b);
-  ALTER TABLE t1 ADD CONSTRAINT p1 PRIMARY KEY(a);
+  ALTER TABLE t1 ADD PRIMARY KEY(a);
 } {1 {cannot add an INTEGER PRIMARY KEY to table "t1": column "a" would become an alias for the rowid}}
 do_execsql_test 6.1 {
   SELECT sql FROM sqlite_schema WHERE name='t1';
@@ -253,21 +253,21 @@ do_execsql_test 6.1 {
 reset_db
 do_execsql_test 6.2 {
   CREATE TABLE t1(a INT, b);
-  ALTER TABLE t1 ADD CONSTRAINT p1 PRIMARY KEY(a);
+  ALTER TABLE t1 ADD PRIMARY KEY(a);
   SELECT name, origin FROM pragma_index_list('t1');
 } {sqlite_autoindex_t1_1 pk}
 
 reset_db
 do_catchsql_test 6.3 {
   CREATE TABLE t1(a TEXT PRIMARY KEY, b);
-  ALTER TABLE t1 ADD CONSTRAINT p1 PRIMARY KEY(b);
+  ALTER TABLE t1 ADD PRIMARY KEY(b);
 } {1 {table "t1" has more than one primary key}}
 
 reset_db
 do_catchsql_test 6.4 {
   CREATE TABLE t1(a);
   INSERT INTO t1 VALUES(1),(1);
-  ALTER TABLE t1 ADD CONSTRAINT u1 UNIQUE(a);
+  ALTER TABLE t1 ADD UNIQUE(a);
 } {1 {UNIQUE constraint failed: t1.a}}
 do_execsql_test 6.5 {
   SELECT (SELECT sql FROM sqlite_schema WHERE name='t1'), count(*) FROM t1;
@@ -276,7 +276,7 @@ do_execsql_test 6.5 {
 reset_db
 do_catchsql_test 6.6 {
   CREATE TABLE t1(a, CONSTRAINT n1 CHECK(a>0));
-  ALTER TABLE t1 ADD CONSTRAINT n1 UNIQUE(a);
+  ALTER TABLE t1 ADD CHECK n1 (a<10);
 } {1 {constraint n1 already exists}}
 
 reset_db
@@ -302,11 +302,11 @@ do_catchsql_test 6.10 {
 } {1 {no such column: zz}}
 
 do_catchsql_test 6.11 {
-  ALTER TABLE t1 ADD CONSTRAINT u1 UNIQUE(zz);
+  ALTER TABLE t1 ADD UNIQUE(zz);
 } {1 {no such column: zz}}
 
 do_catchsql_test 6.12 {
-  ALTER TABLE t1 ADD CONSTRAINT p1 PRIMARY KEY(a AUTOINCREMENT);
+  ALTER TABLE t1 ADD PRIMARY KEY(a AUTOINCREMENT);
 } {1 {AUTOINCREMENT is only allowed on an INTEGER PRIMARY KEY}}
 
 # A PRIMARY KEY on a STRICT table would make its columns NOT NULL, and
@@ -315,8 +315,8 @@ reset_db
 do_catchsql_test 6.13 {
   CREATE TABLE t1(a TEXT, b INT) STRICT;
   INSERT INTO t1 VALUES(NULL,1);
-  ALTER TABLE t1 ADD CONSTRAINT p1 PRIMARY KEY(a);
-} {1 {PRIMARY KEY p1 on t1 would be NULL}}
+  ALTER TABLE t1 ADD PRIMARY KEY(a);
+} {1 {PRIMARY KEY on t1 would be NULL}}
 do_execsql_test 6.14 {
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a TEXT, b INT) STRICT}}
@@ -324,18 +324,18 @@ do_execsql_test 6.14 {
 reset_db
 do_catchsql_test 6.15 {
   CREATE VIEW v1 AS SELECT 1 AS a;
-  ALTER TABLE v1 ADD CONSTRAINT u1 UNIQUE(a);
+  ALTER TABLE v1 ADD UNIQUE(a);
 } {1 {cannot edit constraints of view "v1"}}
 
 do_catchsql_test 6.16 {
-  ALTER TABLE nosuch ADD CONSTRAINT u1 UNIQUE(a);
+  ALTER TABLE nosuch ADD UNIQUE(a);
 } {1 {no such table: nosuch}}
 
-# The name is not optional.
+# There is no name to give: a UNIQUE is reached by its columns.
 do_catchsql_test 6.17 {
   CREATE TABLE t1(a);
-  ALTER TABLE t1 ADD UNIQUE(a);
-} {1 {near "UNIQUE": syntax error}}
+  ALTER TABLE t1 ADD CONSTRAINT n UNIQUE(a);
+} {1 {near "CONSTRAINT": syntax error}}
 
 #-------------------------------------------------------------------------
 # The temp schema and an attached schema work the same way, and neither
@@ -345,9 +345,9 @@ reset_db
 do_execsql_test 7.0 {
   CREATE TEMP TABLE t1(a,b);
   INSERT INTO t1 VALUES(1,2);
-  ALTER TABLE t1 ADD CONSTRAINT u1 UNIQUE(a);
+  ALTER TABLE t1 ADD UNIQUE(a);
   SELECT type, name, coalesce(sql,'-') FROM sqlite_temp_schema ORDER BY name;
-} {index sqlite_autoindex_t1_1 - table t1 {CREATE TABLE t1(a,b, CONSTRAINT u1 UNIQUE(a))}}
+} {index sqlite_autoindex_t1_1 - table t1 {CREATE TABLE t1(a,b, UNIQUE(a))}}
 do_execsql_test 7.1 { PRAGMA integrity_check } {ok}
 do_execsql_test 7.2 { SELECT count(*) FROM main.sqlite_schema } {0}
 
@@ -356,9 +356,9 @@ forcedelete test.db2
 do_execsql_test 7.3 {
   ATTACH 'test.db2' AS aux;
   CREATE TABLE aux.t1(a,b);
-  ALTER TABLE aux.t1 ADD CONSTRAINT u1 UNIQUE(a);
+  ALTER TABLE aux.t1 ADD UNIQUE(a);
   SELECT type, name, coalesce(sql,'-') FROM aux.sqlite_schema ORDER BY name;
-} {index sqlite_autoindex_t1_1 - table t1 {CREATE TABLE t1(a,b, CONSTRAINT u1 UNIQUE(a))}}
+} {index sqlite_autoindex_t1_1 - table t1 {CREATE TABLE t1(a,b, UNIQUE(a))}}
 do_execsql_test 7.4 { SELECT count(*) FROM main.sqlite_schema } {0}
 do_execsql_test 7.5 { PRAGMA aux.integrity_check } {ok}
 
@@ -371,13 +371,13 @@ do_execsql_test 8.0 {
   CREATE TABLE t1(a);
   INSERT INTO t1 VALUES(1);
   BEGIN;
-  ALTER TABLE t1 ADD CONSTRAINT u1 UNIQUE(a);
+  ALTER TABLE t1 ADD UNIQUE(a);
   ROLLBACK;
   SELECT type, name FROM sqlite_schema ORDER BY name;
 } {table t1}
 do_execsql_test 8.1 {
   BEGIN;
-  ALTER TABLE t1 ADD CONSTRAINT u1 UNIQUE(a);
+  ALTER TABLE t1 ADD UNIQUE(a);
   COMMIT;
   SELECT type, name FROM sqlite_schema ORDER BY name;
 } {index sqlite_autoindex_t1_1 table t1}
@@ -396,29 +396,29 @@ do_execsql_test 8.2 { PRAGMA integrity_check } {ok}
 #
 foreach {tn newsql alter res final} {
   1 {CREATE TABLE t1(a, b)}
-    {ALTER TABLE t1 ALTER c DROP NOT NULL}
+    {ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL}
     {1 {no such column: c}}
     {CREATE TABLE t1(a, b)}
 
   2 {CREATE TABLE t1(x, y, z)}
-    {ALTER TABLE t1 ALTER c DROP NOT NULL}
+    {ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL}
     {1 {no such column: c}}
     {CREATE TABLE t1(x, y, z)}
 
   3 {CREATE TABLE t1(a, b)}
-    {ALTER TABLE t1 ALTER c SET NOT NULL}
+    {ALTER TABLE t1 ALTER COLUMN c ADD NOT NULL}
     {1 {no such column: c}}
     {CREATE TABLE t1(a, b)}
 
   4 {CREATE TABLE t1(b, a, c)}
-    {ALTER TABLE t1 ALTER c DROP NOT NULL}
+    {ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL}
     {0 {}}
     {CREATE TABLE t1(b, a, c)}
 
   5 {CREATE TABLE t1(a, b)}
-    {ALTER TABLE t1 ADD CONSTRAINT k CHECK(a>0)}
+    {ALTER TABLE t1 ADD CHECK k (a>0)}
     {0 {}}
-    {CREATE TABLE t1(a, b, CONSTRAINT k CHECK(a>0))}
+    {CREATE TABLE t1(a, b, CONSTRAINT k CHECK (a>0))}
 
   6 {CREATE TABLE t1(a, b)}
     {ALTER TABLE t1 COLUMN a ADD DEFAULT 1}
@@ -426,9 +426,9 @@ foreach {tn newsql alter res final} {
     {CREATE TABLE t1(a DEFAULT 1, b)}
 
   7 {CREATE TABLE t1(a, b, c)}
-    {ALTER TABLE t1 ADD CONSTRAINT k CHECK(a>0)}
+    {ALTER TABLE t1 ADD CHECK k (a>0)}
     {0 {}}
-    {CREATE TABLE t1(a, b, c, CONSTRAINT k CHECK(a>0))}
+    {CREATE TABLE t1(a, b, c, CONSTRAINT k CHECK (a>0))}
 } {
   reset_db
   do_execsql_test 9.$tn.0 {
@@ -469,7 +469,7 @@ do_execsql_test 9.20.0 {
   PRAGMA writable_schema = 0;
 }
 do_catchsql_test 9.20.1 {
-  ALTER TABLE t1 ALTER c DROP NOT NULL;
+  ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL;
 } {1 {malformed database schema (t1) - incomplete input}}
 do_execsql_test 9.20.2 {
   PRAGMA writable_schema = 1;
@@ -488,7 +488,7 @@ do_execsql_test 9.21.0 {
   PRAGMA writable_schema = 0;
 }
 do_catchsql_test 9.21.1 {
-  ALTER TABLE t1 ALTER c DROP NOT NULL;
+  ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL;
 } {1 {malformed database schema (t1)}}
 do_execsql_test 9.21.2 {
   PRAGMA writable_schema = 1;
@@ -507,12 +507,12 @@ do_execsql_test 9.21.2 {
 #
 foreach {tn alter} {
   1 {ALTER TABLE t1 ADD CHECK(a>0)}
-  2 {ALTER TABLE t1 ADD CONSTRAINT k CHECK(a>0)}
-  3 {ALTER TABLE t1 ADD CONSTRAINT u UNIQUE(a)}
-  4 {ALTER TABLE t1 ADD CONSTRAINT p PRIMARY KEY(a)}
+  2 {ALTER TABLE t1 ADD CHECK k (a>0)}
+  3 {ALTER TABLE t1 ADD UNIQUE(a)}
+  4 {ALTER TABLE t1 ADD PRIMARY KEY(a)}
   5 {ALTER TABLE t1 COLUMN a ADD DEFAULT 1}
-  6 {ALTER TABLE t1 ALTER a SET NOT NULL}
-  7 {ALTER TABLE t1 ALTER c DROP NOT NULL}
+  6 {ALTER TABLE t1 ALTER COLUMN a ADD NOT NULL}
+  7 {ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL}
   8 {ALTER TABLE t1 COLUMN a DROP DEFAULT}
   9 {ALTER TABLE t1 DROP CHECK}
 } {
@@ -547,7 +547,7 @@ do_execsql_test 10.0 {
   CREATE TABLE t1(a, g AS (a*2));
 }
 do_catchsql_test 10.1 {
-  ALTER TABLE t1 ADD CONSTRAINT p PRIMARY KEY(g);
+  ALTER TABLE t1 ADD PRIMARY KEY(g);
 } {1 {error in table t1 after add constraint: generated columns cannot be part of the PRIMARY KEY}}
 
 # The statement took the schema edit and the index it had already built

@@ -4309,7 +4309,7 @@ typedef struct {
 #define INITFLAG_AlterRename   0x0001  /* Reparse after a RENAME */
 #define INITFLAG_AlterDrop     0x0002  /* Reparse after a DROP COLUMN */
 #define INITFLAG_AlterAdd      0x0003  /* Reparse after an ADD COLUMN */
-#define INITFLAG_AlterDropCons 0x0004  /* Reparse after a DROP CONSTRAINT */
+#define INITFLAG_AlterDropCons 0x0004  /* Reparse after dropping a constraint */
 #define INITFLAG_AlterAddCons  0x0005
 #define INITFLAG_AlterSetOpt   0x0006
 #define INITFLAG_AlterSetType  0x0007
@@ -5572,17 +5572,10 @@ void sqlite3Reindex(Parse*, Token*, Token*);
 void sqlite3AlterFunctions(void);
 void sqlite3AlterRenameTable(Parse*, SrcList*, Token*);
 void sqlite3AlterRenameColumn(Parse*, SrcList*, Token*, Token*);
-void sqlite3AlterDropConstraint(Parse*,SrcList*,Token*,Token*,int);
-void sqlite3AlterAddConstraint(
-  Parse *pParse,           /* Parse context */
-  SrcList *pSrc,           /* Table to add constraint to */
-  Token *pFirst,           /* First token of new constraint */
-  Token *pName,            /* Name of new constraint. NULL if name omitted. */
-  const char *zExpr,       /* Text of CHECK expression */
-  int nExpr,               /* Size of pExpr in bytes */
-  Expr *pExpr              /* The parsed CHECK expression */
-);
-void sqlite3AlterSetNotNull(Parse*, SrcList*, Token*, Token*);
+void sqlite3AlterDropConstraint(Parse*,SrcList*,Token*,int);
+void sqlite3AlterAddCheck(Parse*,SrcList*,Token*,Token*,Token*,
+                          const char*,int,Expr*);
+void sqlite3AlterAddNotNull(Parse*, SrcList*, Token*, Token*);
 void sqlite3AlterSetTableOption(Parse*,SrcList*,Token*,int,int);
 typedef struct AlterRebuild AlterRebuild;
 int sqlite3RunAlterTabOpt(char**, sqlite3*, int, const AlterRebuild*, int);
@@ -5613,22 +5606,24 @@ void sqlite3AlterFinishAddColumn(Parse *, Token *);
 void sqlite3AlterBeginAddColumn(Parse *, SrcList *);
 void sqlite3AlterDropColumn(Parse*, SrcList*, const Token*);
 void sqlite3AlterDropPrimaryKey(Parse*, SrcList*);
+void sqlite3AlterDropUnique(Parse*,SrcList*,ExprList*);
 void sqlite3AlterDropForeignKey(Parse*,SrcList*,ExprList*,Token*,
                                 ExprList*);
-void sqlite3AlterDropCheck(Parse*, SrcList*);
+void sqlite3AlterDropCheck(Parse*, SrcList*, Token*);
 void sqlite3AlterSetColumnType(Parse*, SrcList*, Token*, Token*);
-void sqlite3AlterAddNamedConstraint(Parse*,SrcList*,Token*,Token*,int,
+void sqlite3AlterAddTableConstraint(Parse*,SrcList*,Token*,int,
                                     ExprList*,const char*,int);
 void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Expr*,
                             const char*,const char*);
 #define ALTERCONS_Unique      1
 #define ALTERCONS_PrimaryKey  2
 #define ALTERCONS_ForeignKey  3
-void sqlite3ConsLocAdd(Parse*, u8, int, const char*, const char*);
-void sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
+ParseLoc *sqlite3ConsLocAdd(Parse*, u8, int, const char*, const char*);
+ParseLoc *sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ColDefLocExtend(Parse*);
 void sqlite3FkDeferLocAdd(Parse*, const char*);
 void sqlite3ColConsLocAdd(Parse*, u8, Token*, int);
+void sqlite3UniqueLocAdd(Parse*, Token*, ExprList*);
 void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 #define PARSELOC_NotNull  1
 #define PARSELOC_ColDef   2
@@ -5638,6 +5633,7 @@ void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 #define PARSELOC_Check     6
 #define PARSELOC_ColType   7
 #define PARSELOC_Deferrable 8
+#define PARSELOC_Unique    9
 const void *sqlite3RenameTokenMap(Parse*, const void*, const Token*);
 void sqlite3RenameTokenRemap(Parse*, const void *pTo, const void *pFrom);
 void sqlite3RenameExprUnmap(Parse*, Expr*);

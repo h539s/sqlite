@@ -754,6 +754,9 @@ struct ParseLoc {
   u8 eType;
   int iCol;
   Token t;
+  Token tName;
+  char **azCol;
+  int nCol;
   ParseLoc *pNext;
 };
 
@@ -2482,7 +2485,7 @@ static int notNullRtrim(const char *zStart, const char *zEnd){
 }
 
 /* Record a constraint's extent, taking in its CONSTRAINT name and lookahead. */
-void sqlite3ConsLocAdd(
+ParseLoc *sqlite3ConsLocAdd(
   Parse *pParse,
   u8 eType,
   int iCol,
@@ -2491,7 +2494,11 @@ void sqlite3ConsLocAdd(
 ){
   const char *zKw;
   const char *zLimit;
+  ParseLoc *pNew;
+  Token sName;
 
+  sName.z = 0;
+  sName.n = 0;
   assert( pParse->isCreate );
   assert( zStart!=0 && zEnd!=0 && zEnd>zStart );
 
@@ -2503,6 +2510,7 @@ void sqlite3ConsLocAdd(
      && &zGap[getWhitespace((const u8*)zGap)]==zStart
     ){
       zStart = zKw;
+      sName = pParse->u1.cr.constraintName;
     }
   }
 
@@ -2510,7 +2518,9 @@ void sqlite3ConsLocAdd(
   if( zLimit==0 || zLimit<zEnd ) zLimit = zEnd;
   zEnd = &zStart[notNullRtrim(zStart, zLimit)];
 
-  sqlite3ParseLocAdd(pParse, eType, iCol, zStart, zEnd);
+  pNew = sqlite3ParseLocAdd(pParse, eType, iCol, zStart, zEnd);
+  if( pNew ) pNew->tName = sName;
+  return pNew;
 }
 
 /* Extend the current column's extent over the constraint just parsed. */
@@ -2543,6 +2553,44 @@ void sqlite3ColConsLocAdd(Parse *pParse, u8 eType, Token *pKw, int bCol){
   sqlite3ConsLocAdd(pParse, eType, iCol, pKw->z, &pKw->z[pKw->n]);
 }
 
+/* Record a UNIQUE clause, with the columns it covers, for DROP UNIQUE. */
+void sqlite3UniqueLocAdd(Parse *pParse, Token *pKw, ExprList *pList){
+  sqlite3 *db = pParse->db;
+  Table *p = pParse->pNewTable;
+  ParseLoc *pLoc;
+  int nCol;
+  int i;
+
+  assert( IN_RENAME_OBJECT );
+  if( p==0 ) return;
+  nCol = pList ? pList->nExpr : 1;
+  if( pList==0 && p->nCol<=0 ) return;
+
+  pLoc = sqlite3ConsLocAdd(pParse, PARSELOC_Unique, -1, pKw->z, &pKw->z[pKw->n]);
+  if( pLoc==0 ) return;
+
+  pLoc->azCol = sqlite3DbMallocZero(db, sizeof(char*)*(i64)nCol);
+  if( pLoc->azCol==0 ) return;
+  pLoc->nCol = nCol;
+  for(i=0; i<nCol; i++){
+    const char *zCol = 0;
+    if( pList==0 ){
+      zCol = p->aCol[p->nCol-1].zCnName;
+    }else{
+      Expr *pExpr = sqlite3ExprSkipCollate(pList->a[i].pExpr);
+      if( pExpr && (pExpr->op==TK_ID || pExpr->op==TK_STRING)
+       && !ExprHasProperty(pExpr, EP_IntValue)
+      ){
+        zCol = pExpr->u.zToken;
+      }
+    }
+    if( zCol ){
+      pLoc->azCol[i] = sqlite3DbStrDup(db, zCol);
+      if( pLoc->azCol[i]==0 ) return;
+    }
+  }
+}
+
 /* Record the DEFERRABLE clause that follows a column-level FOREIGN KEY. */
 void sqlite3FkDeferLocAdd(Parse *pParse, const char *zEnd){
   ParseLoc *p;
@@ -2573,7 +2621,7 @@ void sqlite3FkDeferLocAdd(Parse *pParse, const char *zEnd){
 }
 
 /* Record one position within the text being parsed. */
-void sqlite3ParseLocAdd(
+ParseLoc *sqlite3ParseLocAdd(
   Parse *pParse,
   u8 eType,
   int iCol,
@@ -2586,80 +2634,26 @@ void sqlite3ParseLocAdd(
   assert( zStart!=0 && zEnd!=0 && zEnd>=zStart );
 
   pNew = sqlite3DbMallocZero(pParse->db, sizeof(ParseLoc));
-  if( pNew==0 ) return;
+  if( pNew==0 ) return 0;
   pNew->eType = eType;
   pNew->iCol = iCol;
   pNew->t.z = zStart;
   pNew->t.n = (unsigned)(zEnd - zStart);
   pNew->pNext = pParse->pLoc;
   pParse->pLoc = pNew;
+  return pNew;
 }
 
 /* Free a list of ParseLoc objects. */
 void sqlite3ParseLocFree(sqlite3 *db, ParseLoc *pLoc){
   while( pLoc ){
     ParseLoc *pNext = pLoc->pNext;
+    int i;
+    for(i=0; i<pLoc->nCol; i++) sqlite3DbFree(db, pLoc->azCol[i]);
+    sqlite3DbFree(db, pLoc->azCol);
     sqlite3DbFree(db, pLoc);
     pLoc = pNext;
   }
-}
-
-/*
-** Argument z points into the body of a constraint - specifically the 
-** second token of the constraint definition.  For a named constraint,
-** z points to the second token of the constraint definition. For an 
-** unnamed NOT NULL constraint, z points to the first byte past the NOT 
-** keyword.
-**
-** Argument eTok may be the token value of the first token of the constraint
-** (e.g. TK_CHECK or TK_REFERENCES) or zero. If it is either TK_REFERENCES
-** or TK_FOREIGN, special parsing is enabled to find the end of the foreign-key
-** constraint definition.
-**
-** Return the number of bytes until the end of the constraint. 
-*/
-static int getConstraint(const u8 *z, int eTok){
-  int iOff = 0;
-  int t = 0;
-
-#ifndef SQLITE_OMIT_FOREIGN_KEY
-  if( eTok==TK_FOREIGN ){
-    /* For a FOREIGN KEY constraint, use getConstraint() to parse everything
-    ** up to the REFERENCES keyword. Then getConstraintToken() to consume
-    ** the TK_REFERENCES token itself. Then fall through to the special
-    ** handling for TK_REFERENCES below.  */
-    iOff = getConstraint(z, 0);
-    iOff += getConstraintToken(&z[iOff], &eTok);
-  }
-
-  if( eTok==TK_REFERENCES ){
-    /* REFERENCES is followed by a table name. Gobble this up here in
-    ** case the table name is a fallback token like TK_GENERATED. */
-    iOff += getConstraintToken(&z[iOff], &t);
-  }
-#endif
-
-  /* Now, the current constraint proceeds until the next occurence of one 
-  ** of the following tokens: 
-  **
-  **   CONSTRAINT, PRIMARY, NOT, UNIQUE, CHECK, DEFAULT, 
-  **   COLLATE, REFERENCES, FOREIGN, GENERATED, AS, RP, or COMMA
-  **
-  ** Also exit the loop if ILLEGAL turns up.
-  */
-  while( 1 ){
-    int n = getConstraintToken(&z[iOff], &t);
-    if( t==TK_CONSTRAINT || t==TK_PRIMARY || t==TK_NOT || t==TK_UNIQUE
-     || t==TK_CHECK || t==TK_DEFAULT || t==TK_COLLATE || t==TK_REFERENCES
-     || t==TK_FOREIGN || t==TK_RP || t==TK_COMMA || t==TK_ILLEGAL
-     || t==TK_AS || t==TK_GENERATED
-    ){
-      break;
-    }
-    iOff += n;
-  }
-  
-  return iOff;
 }
 
 /*
@@ -2699,170 +2693,6 @@ static int quotedCompare(
   return SQLITE_OK;
 }
 
-/*
-** zSql[] is a CREATE TABLE statement, supposedly.  Find the offset
-** into zSql[] of the first character past the first "(" and write
-** that offset into *piOff and return SQLITE_OK.  Or, if not found,
-** set the SQLITE_CORRUPT error code and return SQLITE_ERROR.
-*/
-static int skipCreateTable(sqlite3_context *ctx, const u8 *zSql, int *piOff){
-  int iOff = 0;
-
-  if( zSql==0 ) return SQLITE_ERROR;
-
-  /* Jump past the "CREATE TABLE" bit. */
-  while( 1 ){
-    int t = 0;
-    iOff += sqlite3GetToken(&zSql[iOff], &t);
-    if( t==TK_LP ) break;
-    if( t==TK_ILLEGAL ){
-      sqlite3_result_error_code(ctx, SQLITE_CORRUPT_BKPT);
-      return SQLITE_ERROR;
-    }
-  }
-
-  *piOff = iOff;
-  return SQLITE_OK;
-}
-
-/*
-** Internal SQL function sqlite3_drop_constraint():  Given an input
-** CREATE TABLE statement, return a revised CREATE TABLE statement
-** with a constraint removed.  Two forms, depending on the datatype
-** of argv[2]:
-**
-**   sqlite_drop_constraint(SQL, INT)  -- Omit NOT NULL from the INT-th column
-**   sqlite_drop_constraint(SQL, TEXT) -- OMIT constraint with name TEXT
-**
-** In the first case, the left-most column is 0.
-*/
-static void dropConstraintFunc(
-  sqlite3_context *ctx,
-  int NotUsed,
-  sqlite3_value **argv
-){
-  const u8 *zSql = sqlite3_value_text(argv[0]);
-  const u8 *zCons = 0;
-  int iNotNull = -1;
-  int ii;
-  int iOff = 0;
-  int iStart = 0;
-  int iEnd = 0;
-  char *zNew = 0;
-  int t = 0;
-  sqlite3 *db;
-  UNUSED_PARAMETER(NotUsed);
-
-  if( zSql==0 ) return;
-
-  /* Jump past the "CREATE TABLE" bit. */
-  if( skipCreateTable(ctx, zSql, &iOff) ) return;
-
-  if( sqlite3_value_type(argv[1])==SQLITE_INTEGER ){
-    iNotNull = sqlite3_value_int(argv[1]);
-  }else{
-    zCons = sqlite3_value_text(argv[1]);
-  }
-
-  /* Search for the named constraint within column definitions. */
-  for(ii=0; iEnd==0; ii++){
-  
-    /* Now parse the column or table constraint definition. Search
-    ** for the token CONSTRAINT if this is a DROP CONSTRAINT command, or
-    ** NOT in the right column if this is a DROP NOT NULL. */
-    while( 1 ){
-      iStart = iOff;
-      iOff += getConstraintToken(&zSql[iOff], &t);
-      if( t==TK_CONSTRAINT && (zCons || iNotNull==ii) ){
-        /* Check if this is the constraint we are searching for. */
-        int nTok = 0;
-        int cmp = 1;
-
-        /* Skip past any whitespace. */
-        iOff += getWhitespace(&zSql[iOff]);
-
-        /* Compare the next token - which may be quoted - with the name of
-        ** the constraint being dropped.  */
-        nTok = getConstraintToken(&zSql[iOff], &t);
-        if( zCons ){
-          if( quotedCompare(ctx, t, &zSql[iOff], nTok, zCons, &cmp) ) return;
-        }
-        iOff += nTok;
-
-        /* The next token is usually the first token of the constraint
-        ** definition. This is enough to tell the type of the constraint - 
-        ** TK_NOT means it is a NOT NULL, TK_CHECK a CHECK constraint etc.
-        **
-        ** There is also the chance that the next token is TK_CONSTRAINT
-        ** (or TK_DEFAULT or TK_COLLATE), for example if a table has been
-        ** created as follows:
-        **
-        **    CREATE TABLE t1(cols, CONSTRAINT one CONSTRAINT two NOT NULL);
-        **
-        ** In this case, allow the "CONSTRAINT one" bit to be dropped by
-        ** this command if that is what is requested, or to advance to
-        ** the next iteration of the loop with &zSql[iOff] still pointing
-        ** to the CONSTRAINT keyword.  */
-        nTok = getConstraintToken(&zSql[iOff], &t);
-        if( t==TK_CONSTRAINT || t==TK_DEFAULT || t==TK_COLLATE 
-         || t==TK_COMMA || t==TK_RP || t==TK_GENERATED || t==TK_AS 
-        ){
-          t = TK_CHECK;
-        }else{
-          iOff += nTok;
-          iOff += getConstraint(&zSql[iOff], t);
-        }
-
-        if( cmp==0 || (iNotNull>=0 && t==TK_NOT) ){
-          if( t!=TK_NOT && t!=TK_CHECK && t!=TK_REFERENCES && t!=TK_FOREIGN ){
-            errorMPrintf(ctx, "constraint may not be dropped: %s", zCons);
-            return;
-          }
-          iEnd = iOff;
-          break;
-        }
-
-      }else if( t==TK_NOT && iNotNull==ii ){
-        iEnd = iOff + getConstraint(&zSql[iOff], 0);
-        break;
-      }else if( t==TK_RP || t==TK_ILLEGAL ){
-        iEnd = -1;
-        break;
-      }else if( t==TK_COMMA ){
-        break;
-      }
-    }
-  }
-
-  /* If the constraint has not been found it is an error. */
-  if( iEnd<=0 ){
-    if( zCons ){
-      errorMPrintf(ctx, "no such constraint: %s", zCons);
-    }else{
-      /* SQLite follows postgres in that a DROP NOT NULL on a column that is
-      ** not NOT NULL is not an error. So just return the original SQL here. */
-      sqlite3_result_text(ctx, (const char*)zSql, -1, SQLITE_TRANSIENT);
-    }
-  }else{
-
-    /* Figure out if an extra space should be inserted after the constraint
-    ** is removed. And if an additional comma preceding the constraint 
-    ** should be removed. */
-    const char *zSpace = " ";
-    iEnd += getWhitespace(&zSql[iEnd]);
-    sqlite3GetToken(&zSql[iEnd], &t);
-    if( t==TK_RP || t==TK_COMMA ){
-      zSpace = "";
-      if( zSql[iStart-1]==',' ) iStart--;
-    }
-
-    db = sqlite3_context_db_handle(ctx);
-    zNew = sqlite3MPrintf(db, "%.*s%s%s", iStart, zSql, zSpace, &zSql[iEnd]);
-    sqlite3_result_text(ctx, zNew, -1, SQLITE_DYNAMIC);
-  }
-}
-
-
 /* True if column iCol is part of pTab's PRIMARY KEY. */
 static int alterColInPk(Table *pTab, int iCol){
   Index *pPk;
@@ -2887,6 +2717,21 @@ static int alterColumnIndex(Table *pTab, const char *zCol){
   return -1;
 }
 
+/* Offset just past the last real token of z[] that ends at or before iLimit. */
+static int alterEndOfPrevToken(const char *z, int iLimit){
+  int iOff = 0;
+  int iEnd = 0;
+
+  while( iOff<iLimit ){
+    int t = 0;
+    int n = sqlite3GetToken((const u8*)&z[iOff], &t);
+    if( n<=0 || t==TK_ILLEGAL || iOff+n>iLimit ) break;
+    if( t!=TK_SPACE && t!=TK_COMMENT ) iEnd = iOff+n;
+    iOff += n;
+  }
+  return iEnd;
+}
+
 /* Cut the clause at pLoc out of zOut and return the new length. */
 static int alterExciseClause(
   char *zOut,
@@ -2896,20 +2741,24 @@ static int alterExciseClause(
 ){
   int iStart = (int)(pLoc->z - zSql);
   int iEnd = iStart + (int)pLoc->n;
+  int iPrev;
   int t = 0;
 
   assert( iStart>=0 && iEnd<=nOut );
   iEnd += getWhitespace((const u8*)&zOut[iEnd]);
   sqlite3GetToken((const u8*)&zOut[iEnd], &t);
+  iPrev = alterEndOfPrevToken(zOut, iStart);
   while( iStart>0 && sqlite3Isspace(zOut[iStart-1]) ) iStart--;
   if( t==TK_RP || t==TK_COMMA ){
-    if( iStart>0 && zOut[iStart-1]==',' ){
-      iStart--;
+    if( iPrev>0 && zOut[iPrev-1]==',' ){
+      iStart = iPrev-1;
       while( iStart>0 && sqlite3Isspace(zOut[iStart-1]) ) iStart--;
     }
-  }else{
+  }else if( iStart<=iPrev ){
     zOut[iStart] = ' ';
     iStart++;
+  }else{
+    iStart = (int)(pLoc->z - zSql);
   }
   assert( iStart<=iEnd );
 
@@ -3003,7 +2852,7 @@ static void dropColConsFunc(
   AlterEdit x;
 
   UNUSED_PARAMETER(NotUsed);
-  if( iCol<0 && eType!=PARSELOC_Check ) return;
+  if( iCol<0 ) return;
   if( !alterEditBegin(&x, db, iSchema, zSql) ) goto drop_col_cons_done;
   if( iCol>=x.pTab->nCol ){
     x.rc = SQLITE_CORRUPT_BKPT;
@@ -3028,6 +2877,63 @@ static void dropColConsFunc(
   sqlite3_result_text(ctx, x.zOut, x.nOut, SQLITE_TRANSIENT);
 
 drop_col_cons_done:
+  alterEditFinish(&x, ctx);
+}
+
+/* True if the constraint p carries name zName, or has no name if zName==0. */
+static int alterConsNameIs(sqlite3 *db, ParseLoc *p, const char *zName){
+  char *zCopy;
+  int res;
+
+  if( zName==0 ) return p->tName.n==0;
+  if( p->tName.n==0 ) return 0;
+  zCopy = sqlite3DbStrNDup(db, p->tName.z, p->tName.n);
+  if( zCopy==0 ) return 0;
+  sqlite3Dequote(zCopy);
+  res = sqlite3StrICmp(zCopy, zName)==0;
+  sqlite3DbFree(db, zCopy);
+  return res;
+}
+
+/* sqlite_drop_check(ISCHEMA,SQL,NAME): drop that CHECK, or the unnamed ones. */
+static void dropCheckFunc(
+  sqlite3_context *ctx,
+  int NotUsed,
+  sqlite3_value **argv
+){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  int iSchema = sqlite3_value_int(argv[0]);
+  const char *zSql = (const char*)sqlite3_value_text(argv[1]);
+  const char *zName = (const char*)sqlite3_value_text(argv[2]);
+  AlterEdit x;
+  int nFound = 0;
+
+  UNUSED_PARAMETER(NotUsed);
+  if( !alterEditBegin(&x, db, iSchema, zSql) ) goto drop_check_done;
+  if( !alterEditCopy(&x) ) goto drop_check_done;
+
+  while( 1 ){
+    ParseLoc *p;
+    ParseLoc *pBest = 0;
+
+    for(p=x.sParse.pLoc; p; p=p->pNext){
+      if( p->eType!=PARSELOC_Check ) continue;
+      if( !alterConsNameIs(db, p, zName) ) continue;
+      if( pBest==0 || p->t.z>pBest->t.z ) pBest = p;
+    }
+    if( pBest==0 ) break;
+    pBest->eType = 0;
+    x.nOut = alterExciseClause(x.zOut, x.nOut, x.zSql, &pBest->t);
+    nFound++;
+  }
+
+  if( nFound==0 && zName!=0 ){
+    errorMPrintf(ctx, "no such CHECK constraint: %s", zName);
+    goto drop_check_done;
+  }
+  sqlite3_result_text(ctx, x.zOut, x.nOut, SQLITE_TRANSIENT);
+
+drop_check_done:
   alterEditFinish(&x, ctx);
 }
 
@@ -3192,49 +3098,32 @@ static void alterUpdateSchemaSql(
   sqlite3DbFree(db, zEdit);
 }
 
-/*
-** Generate bytecode for one of:
-**
-**  (1)   ALTER TABLE pSrc DROP CONSTRAINT pCons
-**  (2)   ALTER TABLE pSrc ALTER pCol DROP <kind>
-**
-** One of pCons and pCol must be NULL and the other non-null.
-*/
+/* ALTER TABLE pSrc ALTER COLUMN pCol DROP <kind>, where eType is the kind. */
 void sqlite3AlterDropConstraint(
-  Parse *pParse,     /* Parsing context */
-  SrcList *pSrc,     /* The table being altered */
-  Token *pCons,      /* Name of the constraint to drop, or 0 */
-  Token *pCol,       /* Name of the column to take constraints off, or 0 */
-  int eType          /* Kind to drop for form (2) */
+  Parse *pParse,
+  SrcList *pSrc,
+  Token *pCol,
+  int eType
 ){
   sqlite3 *db = pParse->db;
   Table *pTab = 0;
   int iDb = 0;
+  int iCol = 0;
   const char *zDb = 0;
   char *zArg = 0;
 
-  assert( (pCol==0)!=(pCons==0) );
-  assert( (pCol==0)==(eType==0) );
+  assert( pCol!=0 && eType!=0 );
   assert( pSrc->nSrc==1 );
-  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, pCons!=0, 2);
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 0, 2);
   if( !pTab ) return;
 
-  if( pCons ){
-    char *z = sqlite3NameFromToken(db, pCons);
-    zArg = sqlite3MPrintf(db, "sqlite_drop_constraint(sql, %Q)", z);
-    sqlite3DbFree(db, z);
-  }else{
-    int iCol;
-    if( alterFindCol(pParse, pTab, pCol, &iCol) ) return;
-    zArg = sqlite3MPrintf(db, "sqlite_drop_colcons(%d, sql, %d, %d)",
-                          iDb, iCol, eType);
-  }
+  if( alterFindCol(pParse, pTab, pCol, &iCol) ) return;
+  zArg = sqlite3MPrintf(db, "sqlite_drop_colcons(%d, sql, %d, %d)",
+                        iDb, iCol, eType);
 
-  /* Edit the SQL for the named table. */
   alterUpdateSchemaSql(pParse, pTab, zDb, "%s", zArg);
   sqlite3DbFree(db, zArg);
 
-  /* Finally, reload the database schema. */
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
 }
 
@@ -3293,16 +3182,12 @@ static int alterRtrimConstraint(
   return iEnd;
 }
 
-/*
-** Prepare a statement of the form:
-**
-**   ALTER TABLE pSrc ALTER pCol SET NOT NULL
-*/
-void sqlite3AlterSetNotNull(
-  Parse *pParse,   /* Parsing context */
-  SrcList *pSrc,   /* Name of the table being altered */
-  Token *pCol,     /* Name of the column to add a NOT NULL constraint to */
-  Token *pFirst    /* The NOT token of the NOT NULL constraint text */
+/* ALTER TABLE pSrc ALTER COLUMN pCol ADD NOT NULL. */
+void sqlite3AlterAddNotNull(
+  Parse *pParse,
+  SrcList *pSrc,
+  Token *pCol,
+  Token *pFirst
 ){
   Table *pTab = 0;
   int iCol = 0;
@@ -3391,35 +3276,30 @@ static void findConstraintFunc(
   sqlite3_result_int(ctx, 0);
 }
 
-/*
-** Generate bytecode to implement:
-**
-**    ALTER TABLE pSrc ADD [CONSTRAINT pName] CHECK(pExpr)
-**
-** Any "ON CONFLICT" text that occurs after the "CHECK(...)", up
-** until pParse->sLastToken, is included as part of the new constraint.
-*/
-void sqlite3AlterAddConstraint(
-  Parse *pParse,           /* Parse context */
-  SrcList *pSrc,           /* Table to add constraint to */
-  Token *pFirst,           /* First token of new constraint */
-  Token *pName,            /* Name of new constraint. NULL if name omitted. */
-  const char *zExpr,       /* Text of CHECK expression */
-  int nExpr,               /* Size of pExpr in bytes */
-  Expr *pExpr              /* The parsed CHECK expression */
+/* ALTER TABLE pSrc ADD CHECK [pName] (pExpr), taking in any ON CONFLICT. */
+void sqlite3AlterAddCheck(
+  Parse *pParse,
+  SrcList *pSrc,
+  Token *pFirst,
+  Token *pName,
+  Token *pLp,
+  const char *zExpr,
+  int nExpr,
+  Expr *pExpr
 ){ 
-  Table *pTab = 0;         /* Table identified by pSrc */
-  int iDb = 0;             /* Which schema does pTab live in */
-  const char *zDb = 0;     /* Name of the schema in which pTab lives */
-  const char *pCons = 0;   /* Text of the constraint */
-  int nCons;               /* Bytes of text to use from pCons[] */
-  int rc;                  /* Result from error checking pExpr */
+  sqlite3 *db = pParse->db;
+  Table *pTab = 0;
+  int iDb = 0;
+  const char *zDb = 0;
+  char *zName = 0;
+  const char *pCons = 0;
+  int nCons;
+  int rc;
 
-  /* Look up the table being altered. */
   assert( pSrc->nSrc==1 );
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
   if( !pTab ){
-    sqlite3ExprDelete(pParse->db, pExpr);
+    sqlite3ExprDelete(db, pExpr);
     return;
   }
 
@@ -3427,14 +3307,12 @@ void sqlite3AlterAddConstraint(
   ** internal-use-only function.  Forum post 2026-05-10T01:11:28Z
   */
   rc = sqlite3ResolveSelfReference(pParse, pTab, NC_IsCheck, pExpr, 0);
-  sqlite3ExprDelete(pParse->db, pExpr);
+  sqlite3ExprDelete(db, pExpr);
   if( rc ) return;
 
-  /* If this new constraint has a name, check that it is not a duplicate of
-  ** an existing constraint. It is an error if it is.  */
   if( pName ){
-    char *zName = sqlite3NameFromToken(pParse->db, pName);
-
+    zName = sqlite3NameFromToken(db, pName);
+    if( zName==0 ) return;
     sqlite3NestedParse(pParse,
         "SELECT sqlite_fail('constraint %q already exists', %d) "
         "FROM \"%w\"." LEGACY_SCHEMA_TABLE " "
@@ -3442,25 +3320,35 @@ void sqlite3AlterAddConstraint(
         "AND sqlite_find_constraint(sql, %Q)",
         zName, SQLITE_ERROR, zDb, pTab->zName, zName
     );
-    sqlite3DbFree(pParse->db, zName);
   }
 
-  /* Search for a constraint violation. Throw an exception if one is found. */
   sqlite3NestedParse(pParse,
       "SELECT sqlite_fail('constraint failed', %d) "
       "FROM %Q.%Q WHERE (%.*s) IS NOT TRUE", 
       SQLITE_CONSTRAINT, zDb, pTab->zName, nExpr, zExpr
   );
 
-  /* Edit the SQL for the named table. */
-  pCons = pFirst->z;
-  nCons = alterRtrimConstraint(pParse->db, pCons, pParse->sLastToken.z - pCons);
+  if( zName ){
+    char *zWhole;
+    pCons = pLp->z;
+    nCons = alterRtrimConstraint(db, pCons, pParse->sLastToken.z - pCons);
+    zWhole = sqlite3MPrintf(db, "CONSTRAINT %.*s CHECK %.*s",
+                            (int)pName->n, pName->z, nCons, pCons);
+    if( zWhole ){
+      alterUpdateSchemaSql(pParse, pTab, zDb,
+          "sqlite_insert_constraint(%d, sql, %Q, -1)", iDb, zWhole
+      );
+      sqlite3DbFree(db, zWhole);
+    }
+    sqlite3DbFree(db, zName);
+  }else{
+    pCons = pFirst->z;
+    nCons = alterRtrimConstraint(db, pCons, pParse->sLastToken.z - pCons);
+    alterUpdateSchemaSql(pParse, pTab, zDb,
+        "sqlite_insert_constraint(%d, sql, %.*Q, -1)", iDb, nCons, pCons
+    );
+  }
 
-  alterUpdateSchemaSql(pParse, pTab, zDb,
-      "sqlite_insert_constraint(%d, sql, %.*Q, -1)", iDb, nCons, pCons
-  );
-
-  /* Finally, reload the database schema. */
   renameReloadSchema(pParse, iDb, INITFLAG_AlterAddCons);
 }
 
@@ -3520,12 +3408,11 @@ static int alterPkIsRowidAlias(Table *pTab, ExprList *pList, const char **pzCol)
   return 1;
 }
 
-/* ALTER TABLE ADD CONSTRAINT <name> UNIQUE/PRIMARY KEY/FOREIGN KEY. */
-void sqlite3AlterAddNamedConstraint(
+/* ALTER TABLE ADD UNIQUE/PRIMARY KEY/FOREIGN KEY, none of them named. */
+void sqlite3AlterAddTableConstraint(
   Parse *pParse,
   SrcList *pSrc,
   Token *pFirst,
-  Token *pName,
   int eType,
   ExprList *pList,
   const char *zCols,
@@ -3535,7 +3422,6 @@ void sqlite3AlterAddNamedConstraint(
   Table *pTab;
   int iDb = 0;
   const char *zDb = 0;
-  char *zName = 0;
   const char *zCons;
   int nCons;
 
@@ -3544,50 +3430,47 @@ void sqlite3AlterAddNamedConstraint(
        || eType==ALTERCONS_ForeignKey );
 
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
-  if( pTab==0 ) goto add_named_cons_exit;
+  if( pTab==0 ) goto add_table_cons_exit;
 
   if( eType==ALTERCONS_PrimaryKey ){
     const char *zCol = 0;
     if( pTab->tabFlags & TF_HasPrimaryKey ){
       sqlite3ErrorMsg(pParse, "table \"%s\" has more than one primary key",
                       pTab->zName);
-      goto add_named_cons_exit;
+      goto add_table_cons_exit;
     }
     if( alterPkIsRowidAlias(pTab, pList, &zCol) ){
       sqlite3ErrorMsg(pParse,
           "cannot add an INTEGER PRIMARY KEY to table \"%s\": column \"%s\" "
           "would become an alias for the rowid", pTab->zName, zCol);
-      goto add_named_cons_exit;
+      goto add_table_cons_exit;
     }
   }
-
-  zName = sqlite3NameFromToken(db, pName);
-  if( zName==0 ) goto add_named_cons_exit;
 
   zCons = pFirst->z;
   nCons = alterRtrimConstraint(db, zCons, pParse->sLastToken.z - zCons);
 
   if( eType==ALTERCONS_ForeignKey ){
-    alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, -1);
+    alterAddConstraintText(pParse, pTab, iDb, zDb, 0, zCons, nCons, -1);
 
     if( db->flags & SQLITE_ForeignKeys ){
       pParse->colNamesSet = 1;
       sqlite3NestedParse(pParse,
-          "SELECT sqlite_fail('foreign key constraint %q on %q failed', %d) "
+          "SELECT sqlite_fail('foreign key constraint on %q failed', %d) "
           "FROM pragma_foreign_key_check(%Q,%Q)",
-          zName, pTab->zName, SQLITE_CONSTRAINT, pTab->zName, zDb
+          pTab->zName, SQLITE_CONSTRAINT, pTab->zName, zDb
       );
     }
   }else{
     char *zIdx = sqlite3MPrintf(db, "sqlite_autoindex_%s_%d",
                                 pTab->zName, alterCountAutoIndex(pTab)+1);
-    if( zIdx==0 ) goto add_named_cons_exit;
+    if( zIdx==0 ) goto add_table_cons_exit;
 
     if( eType==ALTERCONS_PrimaryKey && (pTab->tabFlags & TF_Strict)!=0 ){
       sqlite3NestedParse(pParse,
-          "SELECT sqlite_fail('PRIMARY KEY %q on %q would be NULL', %d) "
+          "SELECT sqlite_fail('PRIMARY KEY on %q would be NULL', %d) "
           "FROM \"%w\".\"%w\" WHERE (%.*s) IS NULL",
-          zName, pTab->zName, SQLITE_CONSTRAINT, zDb, pTab->zName, nCols, zCols
+          pTab->zName, SQLITE_CONSTRAINT, zDb, pTab->zName, nCols, zCols
       );
     }
 
@@ -3602,12 +3485,11 @@ void sqlite3AlterAddNamedConstraint(
     );
     sqlite3DbFree(db, zIdx);
 
-    alterAddConstraintText(pParse, pTab, iDb, zDb, zName, zCons, nCons, -1);
+    alterAddConstraintText(pParse, pTab, iDb, zDb, 0, zCons, nCons, -1);
   }
 
-add_named_cons_exit:
+add_table_cons_exit:
   sqlite3ExprListDelete(db, pList);
-  sqlite3DbFree(db, zName);
 }
 
 /* ALTER TABLE COLUMN <c> ADD DEFAULT <value>. */
@@ -3707,6 +3589,134 @@ static int alterAutoIndexNumber(const char *zName){
 }
 
 /* The DEFERRABLE clause that belongs to the FOREIGN KEY recorded at pFk, or 0. */
+/* True if pIdx is the automatic index of a UNIQUE over exactly azCol[]. */
+static int alterUniqueMatch(Index *pIdx, int nCol, const char **azCol){
+  Table *pTab = pIdx->pTable;
+  int i;
+
+  if( pIdx->idxType!=SQLITE_IDXTYPE_UNIQUE ) return 0;
+  if( pIdx->nKeyCol!=nCol ) return 0;
+  for(i=0; i<nCol; i++){
+    i16 iCol = pIdx->aiColumn[i];
+    if( iCol<0 ) return 0;
+    assert( iCol<pTab->nCol );
+    if( azCol[i]==0 ) return 0;
+    if( sqlite3StrICmp(pTab->aCol[iCol].zCnName, azCol[i])!=0 ) return 0;
+  }
+  return 1;
+}
+
+/* True if the UNIQUE clause p covers exactly azCol[], in that order. */
+static int alterUniqueLocMatch(ParseLoc *p, int nCol, const char **azCol){
+  int i;
+  if( p->nCol!=nCol ) return 0;
+  for(i=0; i<nCol; i++){
+    if( p->azCol[i]==0 || azCol[i]==0 ) return 0;
+    if( sqlite3StrICmp(p->azCol[i], azCol[i])!=0 ) return 0;
+  }
+  return 1;
+}
+
+/* sqlite_drop_unique(ISCHEMA,SQL,NCOL,<col...>): drop the UNIQUEs over those. */
+static void dropUniqueFunc(
+  sqlite3_context *ctx,
+  int argc,
+  sqlite3_value **argv
+){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  int iSchema = sqlite3_value_int(argv[0]);
+  const char *zSql = (const char*)sqlite3_value_text(argv[1]);
+  int nCol = sqlite3_value_int(argv[2]);
+  const char **azCol = 0;
+  AlterEdit x;
+  int nFound = 0;
+  int i;
+
+  if( nCol<=0 || argc<3+nCol ) return;
+  if( !alterEditBegin(&x, db, iSchema, zSql) ) goto drop_unique_done;
+
+  azCol = sqlite3DbMallocRaw(db, sizeof(char*)*(i64)nCol);
+  if( azCol==0 ){
+    x.rc = SQLITE_NOMEM_BKPT;
+    goto drop_unique_done;
+  }
+  for(i=0; i<nCol; i++){
+    azCol[i] = (const char*)sqlite3_value_text(argv[3+i]);
+  }
+
+  if( !alterEditCopy(&x) ) goto drop_unique_done;
+
+  while( 1 ){
+    ParseLoc *p;
+    ParseLoc *pBest = 0;
+
+    for(p=x.sParse.pLoc; p; p=p->pNext){
+      if( p->eType!=PARSELOC_Unique ) continue;
+      if( !alterUniqueLocMatch(p, nCol, azCol) ) continue;
+      if( pBest==0 || p->t.z>pBest->t.z ) pBest = p;
+    }
+    if( pBest==0 ) break;
+    pBest->eType = 0;
+    x.nOut = alterExciseClause(x.zOut, x.nOut, x.zSql, &pBest->t);
+    nFound++;
+  }
+
+  if( nFound==0 ){
+    errorMPrintf(ctx, "table \"%s\" has no such UNIQUE constraint",
+                 x.pTab->zName);
+    goto drop_unique_done;
+  }
+  sqlite3_result_text(ctx, x.zOut, x.nOut, SQLITE_TRANSIENT);
+
+drop_unique_done:
+  sqlite3DbFree(db, (void*)azCol);
+  alterEditFinish(&x, ctx);
+}
+
+/* Renumber pTab's automatic indexes after the nGone in apGone[] are dropped. */
+static void alterRenumberAutoIndex(
+  Parse *pParse,
+  Table *pTab,
+  const char *zDb,
+  Index **apGone,
+  int nGone
+){
+  sqlite3 *db = pParse->db;
+  Index **apIdx;
+  Index *pIdx;
+  int nIdx = 0;
+  int i, j;
+  int n = 0;
+
+  for(pIdx=pTab->pIndex; pIdx; pIdx=pIdx->pNext){
+    if( pIdx->idxType!=SQLITE_IDXTYPE_APPDEF ) nIdx++;
+  }
+  if( nIdx==0 ) return;
+  apIdx = sqlite3DbMallocRaw(db, sizeof(Index*)*(i64)nIdx);
+  if( apIdx==0 ) return;
+
+  i = nIdx;
+  for(pIdx=pTab->pIndex; pIdx; pIdx=pIdx->pNext){
+    if( pIdx->idxType!=SQLITE_IDXTYPE_APPDEF ) apIdx[--i] = pIdx;
+  }
+  assert( i==0 );
+
+  for(i=0; i<nIdx; i++){
+    for(j=0; j<nGone && apIdx[i]!=apGone[j]; j++){}
+    if( j<nGone ) continue;
+    n++;
+    if( alterAutoIndexNumber(apIdx[i]->zName)!=n ){
+      sqlite3NestedParse(pParse,
+          "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE
+          " SET name='sqlite_autoindex_%q_%d' "
+          "WHERE type='index' AND name=%Q", zDb, pTab->zName, n, apIdx[i]->zName
+      );
+    }
+  }
+
+  sqlite3DbFree(db, apIdx);
+}
+
 static const Token *alterFkDeferLoc(ParseLoc *pList, const ParseLoc *pFk){
   const char *zFrom = &pFk->t.z[pFk->t.n];
   const char *zTo = 0;
@@ -3811,9 +3821,8 @@ drop_fk_done:
   alterEditFinish(&x, ctx);
 }
 
-/* ALTER TABLE DROP CONSTRAINT PRIMARY KEY. */
+/* ALTER TABLE DROP PRIMARY KEY. */
 void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
-  sqlite3 *db = pParse->db;
   Table *pTab;
   Index *pPk;
   int iDb = 0;
@@ -3850,23 +3859,7 @@ void sqlite3AlterDropPrimaryKey(Parse *pParse, SrcList *pSrc){
 
   sqlite3CodeDropIndex(pParse, pPk, iDb);
 
-  {
-    int n = alterAutoIndexNumber(pPk->zName);
-    while( n>0 ){
-      char *zOld = sqlite3MPrintf(db, "sqlite_autoindex_%s_%d", pTab->zName,n+1);
-      int bFound = zOld!=0 && sqlite3FindIndex(db, zOld, zDb)!=0;
-      if( bFound ){
-        sqlite3NestedParse(pParse,
-            "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE
-            " SET name='sqlite_autoindex_%q_%d' "
-            "WHERE type='index' AND name=%Q", zDb, pTab->zName, n, zOld
-        );
-      }
-      sqlite3DbFree(db, zOld);
-      if( !bFound ) break;
-      n++;
-    }
-  }
+  alterRenumberAutoIndex(pParse, pTab, zDb, &pPk, 1);
 
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
 }
@@ -4542,6 +4535,70 @@ void sqlite3AlterSetTableOption(
 }
 
 /* ALTER TABLE DROP FOREIGN KEY(<cols>) REFERENCES <tab>(<cols>). */
+/* Implement "ALTER TABLE <table> DROP UNIQUE(<cols>)". */
+void sqlite3AlterDropUnique(
+  Parse *pParse,
+  SrcList *pSrc,
+  ExprList *pCols
+){
+  sqlite3 *db = pParse->db;
+  Table *pTab;
+  Index *pIdx;
+  Index **apGone = 0;
+  const char **azCol = 0;
+  int nGone = 0;
+  int nIdx = 0;
+  int iDb = 0;
+  const char *zDb = 0;
+  char *zArg = 0;
+  int i;
+
+  assert( pSrc->nSrc==1 );
+  pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
+  if( pTab==0 ) goto drop_unique_exit;
+  if( pCols==0 || pCols->nExpr<=0 ) goto drop_unique_exit;
+
+  for(pIdx=pTab->pIndex; pIdx; pIdx=pIdx->pNext) nIdx++;
+  azCol = sqlite3DbMallocRaw(db, sizeof(char*)*(i64)pCols->nExpr);
+  apGone = sqlite3DbMallocRaw(db, sizeof(Index*)*(i64)(nIdx ? nIdx : 1));
+  if( azCol==0 || apGone==0 ) goto drop_unique_exit;
+  for(i=0; i<pCols->nExpr; i++){
+    azCol[i] = pCols->a[i].zEName;
+  }
+  for(pIdx=pTab->pIndex; pIdx; pIdx=pIdx->pNext){
+    if( alterUniqueMatch(pIdx, pCols->nExpr, azCol) ) apGone[nGone++] = pIdx;
+  }
+  if( nGone==0 ){
+    sqlite3ErrorMsg(pParse, "table \"%s\" has no such UNIQUE constraint",
+                    pTab->zName);
+    goto drop_unique_exit;
+  }
+
+  zArg = sqlite3MPrintf(db, "sqlite_drop_unique(%d, sql, %d", iDb,
+                        pCols->nExpr);
+  for(i=0; zArg && i<pCols->nExpr; i++){
+    zArg = sqlite3MPrintf(db, "%z, %Q", zArg, azCol[i]);
+  }
+  if( zArg==0 ) goto drop_unique_exit;
+  zArg = sqlite3MPrintf(db, "%z)", zArg);
+  if( zArg==0 ) goto drop_unique_exit;
+
+  alterUpdateSchemaSql(pParse, pTab, zDb, "%s", zArg);
+
+  for(i=0; i<nGone; i++){
+    sqlite3CodeDropIndex(pParse, apGone[i], iDb);
+  }
+  alterRenumberAutoIndex(pParse, pTab, zDb, apGone, nGone);
+
+  renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
+
+drop_unique_exit:
+  sqlite3DbFree(db, zArg);
+  sqlite3DbFree(db, (void*)azCol);
+  sqlite3DbFree(db, apGone);
+  sqlite3ExprListDelete(db, pCols);
+}
+
 void sqlite3AlterDropForeignKey(
   Parse *pParse,
   SrcList *pSrc,
@@ -4588,18 +4645,25 @@ drop_fk_exit:
   sqlite3ExprListDelete(db, pToCol);
 }
 
-/* ALTER TABLE DROP CHECK, the form that names no column. */
-void sqlite3AlterDropCheck(Parse *pParse, SrcList *pSrc){
+/* ALTER TABLE DROP CHECK [<name>]; no name takes the unnamed ones. */
+void sqlite3AlterDropCheck(Parse *pParse, SrcList *pSrc, Token *pName){
+  sqlite3 *db = pParse->db;
   Table *pTab;
   int iDb = 0;
   const char *zDb = 0;
+  char *zName = 0;
 
   assert( pSrc->nSrc==1 );
   pTab = alterFindTable(pParse, pSrc, &iDb, &zDb, 1, 2);
   if( pTab==0 ) return;
 
-  alterUpdateSchemaSql(pParse, pTab, zDb, "sqlite_drop_colcons(%d, sql, -1, %d)",
-                       iDb, PARSELOC_Check);
+  if( pName ){
+    zName = sqlite3NameFromToken(db, pName);
+    if( zName==0 ) return;
+  }
+  alterUpdateSchemaSql(pParse, pTab, zDb, "sqlite_drop_check(%d, sql, %Q)",
+                       iDb, zName);
+  sqlite3DbFree(db, zName);
 
   renameReloadSchema(pParse, iDb, INITFLAG_AlterDropCons);
 }
@@ -4737,8 +4801,9 @@ void sqlite3AlterFunctions(void){
     INTERNAL_FUNCTION(sqlite_rename_test,    7, renameTableTest),
     INTERNAL_FUNCTION(sqlite_drop_column,    3, dropColumnFunc),
     INTERNAL_FUNCTION(sqlite_rename_quotefix,2, renameQuotefixFunc),
-    INTERNAL_FUNCTION(sqlite_drop_constraint,2, dropConstraintFunc),
     INTERNAL_FUNCTION(sqlite_drop_colcons,   4, dropColConsFunc),
+    INTERNAL_FUNCTION(sqlite_drop_check,     3, dropCheckFunc),
+    INTERNAL_FUNCTION(sqlite_drop_unique,   -1, dropUniqueFunc),
     INTERNAL_FUNCTION(sqlite_set_coltype,    4, setColTypeFunc),
     INTERNAL_FUNCTION(sqlite_drop_fk,       -1, dropFkFunc),
     INTERNAL_FUNCTION(sqlite_drop_pk,        2, dropPkFunc),

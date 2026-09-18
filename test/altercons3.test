@@ -26,7 +26,7 @@ do_execsql_test 1.0 {
   CREATE TABLE c1(b CONSTRAINT fk REFERENCES p1(a));
 }
 do_execsql_test 1.1 {
-  ALTER TABLE c1 DROP CONSTRAINT fk;
+  ALTER TABLE c1 DROP FOREIGN KEY(b) REFERENCES p1(a);
   SELECT sql FROM sqlite_schema WHERE name='c1';
 } {{CREATE TABLE c1(b)}}
 
@@ -38,7 +38,7 @@ do_execsql_test 2.0 {
   CREATE TABLE c1(b, CONSTRAINT fk FOREIGN KEY (b) REFERENCES p1(a));
 }
 do_execsql_test 2.1 {
-  ALTER TABLE c1 DROP CONSTRAINT fk;
+  ALTER TABLE c1 DROP FOREIGN KEY(b) REFERENCES p1(a);
   SELECT sql FROM sqlite_schema WHERE name='c1';
 } {{CREATE TABLE c1(b)}}
 
@@ -49,39 +49,46 @@ do_execsql_test 3.0 {
   CREATE TABLE c1(b CONSTRAINT fk REFERENCES generated(a));
 }
 do_execsql_test 3.1 {
-  ALTER TABLE c1 DROP CONSTRAINT fk;
+  ALTER TABLE c1 DROP FOREIGN KEY(b) REFERENCES generated(a);
   SELECT sql FROM sqlite_schema WHERE name='c1';
 } {{CREATE TABLE c1(b)}}
 
 #--------------------------------------------------------------------------
 reset_db
 
-foreach {tn before after} {
+foreach {tn before drop after} {
   1 "CREATE TABLE c1(b CONSTRAINT fk REFERENCES p1(a))"
+    "DROP FOREIGN KEY(b) REFERENCES p1(a)"
     "CREATE TABLE c1(b)"
 
   2 "CREATE TABLE c1(b, c, CONSTRAINT fk FOREIGN key (c, b) REFERENCES p1(o,t))"
+    "DROP FOREIGN KEY(c, b) REFERENCES p1(o,t)"
     "CREATE TABLE c1(b, c)"
 
   3 "CREATE TABLE c1(b, generated, 
        CONSTRAINT fk FOREIGN key (generated) REFERENCES p1(o))"
+    "DROP FOREIGN KEY(generated) REFERENCES p1(o)"
     "CREATE TABLE c1(b, generated)"
 
   4 "CREATE TABLE c1(b, generated CONSTRAINT fk REFERENCES p1(o) NOT NULL)"
+    "DROP FOREIGN KEY(generated) REFERENCES p1(o)"
     "CREATE TABLE c1(b, generated NOT NULL)"
 
   5 "CREATE TABLE c1(b, generated CONSTRAINT fk REFERENCES x1)"
+    "DROP FOREIGN KEY(generated) REFERENCES x1"
     "CREATE TABLE c1(b, generated)"
 } {
   do_execsql_test 4.$tn.1 { DROP TABLE IF EXISTS c1 }
   do_execsql_test 4.$tn.2 $before
-  do_execsql_test 4.$tn.3 { ALTER TABLE c1 DROP CONSTRAINT fk }
+  do_execsql_test 4.$tn.3 "ALTER TABLE c1 $drop"
   do_execsql_test 4.$tn.4 { 
     SELECT sql FROM sqlite_schema WHERE name='c1' 
   } [list $after]
 }
 
 #-------------------------------------------------------------------------
+# The stored statement does not parse, so the edit is refused and the text
+# is left as it was.
 reset_db
 do_execsql_test 5.0 {
   CREATE TABLE x1(a, b CONSTRAINT ott REFERENCES x2);
@@ -90,7 +97,7 @@ do_execsql_test 5.0 {
 }
 
 do_catchsql_test 5.1 {
-  ALTER TABLE x1 DROP CONSTRAINT ott;
+  ALTER TABLE x1 DROP FOREIGN KEY(b) REFERENCES x2;
 } {1 {database disk image is malformed}}
 
 do_execsql_test 5.2 {

@@ -9,7 +9,7 @@
 #
 #*************************************************************************
 #
-# Tests for ALTER TABLE <table> DROP CONSTRAINT PRIMARY KEY.
+# Tests for ALTER TABLE <table> DROP PRIMARY KEY.
 #
 # A PRIMARY KEY need not be named, so it is dropped by kind rather than by
 # name.  On a rowid table it is a clause in the stored statement plus an
@@ -88,7 +88,7 @@ foreach {tn before after} {
   reset_db
   do_execsql_test 1.$tn.1 $before
   do_execsql_test 1.$tn.2 {
-    ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+    ALTER TABLE t1 DROP PRIMARY KEY;
     SELECT sql FROM sqlite_schema WHERE name='t1';
   } [list [string trim $after]]
   do_execsql_test 1.$tn.3 { PRAGMA integrity_check } {ok}
@@ -127,7 +127,7 @@ foreach {tn before after} {
   reset_db
   execsql $before
   do_execsql_test 2.$tn.1 "
-    ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+    ALTER TABLE t1 DROP PRIMARY KEY;
     $probe
   " $ref
   do_execsql_test 2.$tn.2 { PRAGMA integrity_check } {ok}
@@ -147,7 +147,7 @@ do_execsql_test 3.1 {
     FROM t1 ORDER BY a;
 } {{text:'i'/null:NULL} {text:'j'/real:2.5} {text:'k'/integer:1}}
 do_execsql_test 3.2 {
-  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE t1 DROP PRIMARY KEY;
   SELECT typeof(a)||':'||quote(a)||'/'||typeof(b)||':'||quote(b)
     FROM t1 ORDER BY a;
 } {{text:'i'/null:NULL} {text:'j'/real:2.5} {text:'k'/integer:1}}
@@ -171,7 +171,7 @@ do_execsql_test 4.1.0 {
   SELECT name FROM sqlite_schema WHERE type='index' ORDER BY name;
 } {sqlite_autoindex_t1_1 sqlite_autoindex_t1_2 sqlite_autoindex_t1_3}
 do_execsql_test 4.1.1 {
-  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE t1 DROP PRIMARY KEY;
   SELECT name FROM sqlite_schema WHERE type='index' ORDER BY name;
 } {sqlite_autoindex_t1_1 sqlite_autoindex_t1_2}
 do_execsql_test 4.1.2 { PRAGMA integrity_check } {ok}
@@ -192,7 +192,7 @@ do_execsql_test 4.2.0 {
   INSERT INTO t1 VALUES(1,2),(3,4);
 }
 do_execsql_test 4.2.1 {
-  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE t1 DROP PRIMARY KEY;
   SELECT type, name FROM sqlite_schema ORDER BY name;
 } {index i1 table t1}
 do_execsql_test 4.2.2 {
@@ -210,7 +210,7 @@ proc pk_refuse {tn setup errmsg} {
     SELECT type, name, coalesce(sql,'~') FROM sqlite_schema ORDER BY name
   }]
   do_catchsql_test $tn.1 {
-    ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+    ALTER TABLE t1 DROP PRIMARY KEY;
   } [list 1 $errmsg]
   do_execsql_test $tn.2 {
     SELECT type, name, coalesce(sql,'~') FROM sqlite_schema ORDER BY name
@@ -245,20 +245,20 @@ pk_refuse 5.4 {
 #
 pk_refuse 5.5 {
   CREATE TABLE t1(a TEXT PRIMARY KEY, b);
-  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE t1 DROP PRIMARY KEY;
 } {table "t1" has no PRIMARY KEY}
 
 do_catchsql_test 5.6 {
   CREATE VIEW v1 AS SELECT 1;
-  ALTER TABLE v1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE v1 DROP PRIMARY KEY;
 } {1 {cannot edit constraints of view "v1"}}
 
 do_catchsql_test 5.7 {
-  ALTER TABLE nosuchtable DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE nosuchtable DROP PRIMARY KEY;
 } {1 {no such table: nosuchtable}}
 
 do_catchsql_test 5.8 {
-  ALTER TABLE sqlite_schema DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE sqlite_schema DROP PRIMARY KEY;
 } {1 {table sqlite_master may not be altered}}
 
 #-------------------------------------------------------------------------
@@ -272,7 +272,7 @@ do_execsql_test 6.1.0 {
   INSERT INTO aux.t1 VALUES('k', 1);
 }
 do_execsql_test 6.1.1 {
-  ALTER TABLE aux.t1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE aux.t1 DROP PRIMARY KEY;
   SELECT sql FROM aux.sqlite_schema WHERE name='t1';
   SELECT * FROM aux.t1;
 } {{CREATE TABLE t1(a TEXT, b)} k 1}
@@ -284,7 +284,7 @@ do_execsql_test 6.2.0 {
   INSERT INTO t1 VALUES('k', 1);
 }
 do_execsql_test 6.2.1 {
-  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE t1 DROP PRIMARY KEY;
   SELECT sql FROM temp.sqlite_schema WHERE name='t1';
   SELECT * FROM t1;
 } {{CREATE TABLE t1(a TEXT, b)} k 1}
@@ -297,7 +297,7 @@ reset_db
 do_execsql_test 6.3.0 {
   CREATE TABLE t1(a TEXT PRIMARY KEY, b);
   CREATE TEMP TABLE t1(a TEXT PRIMARY KEY, b);
-  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE t1 DROP PRIMARY KEY;
   SELECT sql FROM temp.sqlite_schema WHERE name='t1';
   SELECT sql FROM main.sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a TEXT, b)} {CREATE TABLE t1(a TEXT PRIMARY KEY, b)}}
@@ -313,7 +313,7 @@ do_execsql_test 7.1.0 {
   CREATE TRIGGER tr1 AFTER INSERT ON t1 BEGIN SELECT 1; END;
 }
 do_execsql_test 7.1.1 {
-  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE t1 DROP PRIMARY KEY;
   SELECT sql FROM sqlite_schema ORDER BY name;
 } {{CREATE TABLE t1(a TEXT, b)}
    {CREATE TRIGGER tr1 AFTER INSERT ON t1 BEGIN SELECT 1; END}
@@ -324,7 +324,7 @@ do_execsql_test 7.2.0 {
   CREATE TABLE t1(a TEXT PRIMARY KEY, b);
   INSERT INTO t1 VALUES('k', 1);
   BEGIN;
-    ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+    ALTER TABLE t1 DROP PRIMARY KEY;
   ROLLBACK;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a TEXT PRIMARY KEY, b)}}
@@ -347,7 +347,7 @@ do_execsql_test 8.1.0 {
   PRAGMA writable_schema = 0;
 }
 do_execsql_test 8.1.1 {
-  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE t1 DROP PRIMARY KEY;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a TEXT, b TEXT)}}
 
@@ -362,7 +362,7 @@ do_execsql_test 8.2.0 {
   PRAGMA writable_schema = 0;
 }
 do_catchsql_test 8.2.1 {
-  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE t1 DROP PRIMARY KEY;
 } {1 {malformed database schema (t1) - incomplete input}}
 do_execsql_test 8.2.2 {
   PRAGMA writable_schema = 1;
@@ -380,7 +380,7 @@ do_execsql_test 8.3.0 {
   PRAGMA writable_schema = 0;
 }
 do_catchsql_test 8.3.1 {
-  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE t1 DROP PRIMARY KEY;
 } {1 {malformed database schema (sqlite_autoindex_t1_1) - orphan index}}
 do_execsql_test 8.3.2 {
   PRAGMA writable_schema = 1;
@@ -400,7 +400,7 @@ do_execsql_test 8.4.0 {
   PRAGMA writable_schema = 0;
 }
 do_execsql_test 8.4.1 {
-  ALTER TABLE t1 DROP CONSTRAINT PRIMARY KEY;
+  ALTER TABLE t1 DROP PRIMARY KEY;
   SELECT sql FROM sqlite_schema WHERE name='t1';
   SELECT il.name, ii.name FROM pragma_index_list('t1') il,
          pragma_index_info(il.name) ii;
