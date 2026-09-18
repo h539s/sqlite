@@ -295,10 +295,11 @@ do_execsql_test 7.1 {
 } {{CREATE TABLE t1(a REFERENCES p1(x), b)}}
 
 #-------------------------------------------------------------------------
-# 8.*: a DEFERRABLE clause written on a column that has no REFERENCES of
-# its own belongs to an earlier key.  It sits nowhere near that key's
-# recorded extent, so the extent is left as it was and the clause is not
-# dragged out with the key.
+# 8.*: a DEFERRABLE clause belongs to whichever key was created last, which
+# need not be the one it is written next to - it may sit behind other
+# column-constraints, or on a column with no REFERENCES of its own.  It goes
+# with the key it belongs to, wherever it was written, and what it was
+# written among stays.
 #
 reset_db
 mkparent
@@ -306,8 +307,49 @@ do_execsql_test 8.1 {
   CREATE TABLE t1(a REFERENCES p1(x), b DEFERRABLE INITIALLY DEFERRED);
   ALTER TABLE t1 DROP FOREIGN KEY (a) REFERENCES p1(x);
   SELECT sql FROM sqlite_schema WHERE name='t1';
-} {{CREATE TABLE t1(a, b DEFERRABLE INITIALLY DEFERRED)}}
+} {{CREATE TABLE t1(a, b)}}
 do_execsql_test 8.2 { PRAGMA integrity_check } {ok}
+
+# Behind another column-constraint.  The COLLATE belongs to the column and
+# stays; the DEFERRABLE belongs to the key and goes.
+#
+reset_db
+mkparent
+do_execsql_test 8.3 {
+  CREATE TABLE t1(a REFERENCES p1(x) COLLATE nocase DEFERRABLE INITIALLY DEFERRED, b);
+  ALTER TABLE t1 DROP FOREIGN KEY (a) REFERENCES p1(x);
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a COLLATE nocase, b)}}
+
+# Only the dropped key's clause goes.
+#
+reset_db
+mkparent
+do_execsql_test 8.4 {
+  CREATE TABLE t1(a REFERENCES p1(x) COLLATE nocase DEFERRABLE INITIALLY DEFERRED,
+                  c REFERENCES p1(y) COLLATE nocase DEFERRABLE INITIALLY DEFERRED);
+  ALTER TABLE t1 DROP FOREIGN KEY (a) REFERENCES p1(x);
+  SELECT sql FROM sqlite_schema WHERE name='t1';
+} {{CREATE TABLE t1(a COLLATE nocase,
+                  c REFERENCES p1(y) COLLATE nocase DEFERRABLE INITIALLY DEFERRED)}}
+
+# Left behind, the clause would not be inert: it would defer a key that was
+# never deferred.  Here b's key is immediate, so a violation is reported by
+# the INSERT rather than held back to the COMMIT.
+#
+reset_db
+mkparent
+do_execsql_test 8.5.0 {
+  CREATE TABLE t1(b REFERENCES p1(x),
+                  a REFERENCES p1(y) COLLATE nocase DEFERRABLE INITIALLY DEFERRED);
+  ALTER TABLE t1 DROP FOREIGN KEY (a) REFERENCES p1(y);
+  PRAGMA foreign_keys = ON;
+}
+do_catchsql_test 8.5.1 {
+  BEGIN;
+    INSERT INTO t1(b) VALUES('nosuchparent');
+} {1 {FOREIGN KEY constraint failed}}
+do_execsql_test 8.5.2 { ROLLBACK }
 
 #-------------------------------------------------------------------------
 # 9.*: an invalid stored statement is refused, and left alone.

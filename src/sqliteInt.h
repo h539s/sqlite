@@ -5627,7 +5627,7 @@ void sqlite3AlterAddDefault(Parse*,SrcList*,Token*,Expr*,
 void sqlite3ConsLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ParseLocAdd(Parse*, u8, int, const char*, const char*);
 void sqlite3ColDefLocExtend(Parse*);
-void sqlite3FkLocExtend(Parse*, const char*);
+void sqlite3FkDeferLocAdd(Parse*, const char*);
 void sqlite3ColConsLocAdd(Parse*, u8, Token*, int);
 void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 #define PARSELOC_NotNull  1
@@ -5637,6 +5637,7 @@ void sqlite3ParseLocFree(sqlite3*, ParseLoc*);
 #define PARSELOC_ForeignKey 5
 #define PARSELOC_Check     6
 #define PARSELOC_ColType   7
+#define PARSELOC_Deferrable 8
 const void *sqlite3RenameTokenMap(Parse*, const void*, const Token*);
 void sqlite3RenameTokenRemap(Parse*, const void *pTo, const void *pFrom);
 void sqlite3RenameExprUnmap(Parse*, Expr*);

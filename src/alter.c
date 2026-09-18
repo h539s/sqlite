@@ -2543,11 +2543,13 @@ void sqlite3ColConsLocAdd(Parse *pParse, u8 eType, Token *pKw, int bCol){
   sqlite3ConsLocAdd(pParse, eType, iCol, pKw->z, &pKw->z[pKw->n]);
 }
 
-/* Extend the newest FOREIGN KEY extent over a trailing DEFERRABLE clause. */
-void sqlite3FkLocExtend(Parse *pParse, const char *zEnd){
+/* Record the DEFERRABLE clause that follows a column-level FOREIGN KEY. */
+void sqlite3FkDeferLocAdd(Parse *pParse, const char *zEnd){
   ParseLoc *p;
   const char *z;
-  int t = 0;
+  const char *zStart = 0;
+  const char *zPrev = 0;
+  int tPrev = 0;
 
   assert( IN_RENAME_OBJECT );
   if( zEnd==0 ) return;
@@ -2555,13 +2557,19 @@ void sqlite3FkLocExtend(Parse *pParse, const char *zEnd){
     if( p->eType==PARSELOC_ForeignKey ) break;
   }
   if( p==0 ) return;
-
   z = &p->t.z[p->t.n];
   if( z>zEnd ) return;
-  z += getWhitespace((const u8*)z);
-  sqlite3GetToken((const u8*)z, &t);
-  if( t!=TK_DEFERRABLE && t!=TK_NOT ) return;
-  p->t.n = (unsigned)notNullRtrim(p->t.z, zEnd);
+  while( z<zEnd ){
+    int t = 0;
+    int n = sqlite3GetToken((const u8*)z, &t);
+    if( n<=0 || t==TK_ILLEGAL ) return;
+    if( t==TK_DEFERRABLE ) zStart = tPrev==TK_NOT ? zPrev : z;
+    if( t!=TK_SPACE && t!=TK_COMMENT ){ tPrev = t; zPrev = z; }
+    z += n;
+  }
+  if( zStart==0 ) return;
+  sqlite3ParseLocAdd(pParse, PARSELOC_Deferrable, -1, zStart,
+                     &zStart[notNullRtrim(zStart, zEnd)]);
 }
 
 /* Record one position within the text being parsed. */
@@ -3698,6 +3706,22 @@ static int alterAutoIndexNumber(const char *zName){
   return z[0]==0 ? n : 0;
 }
 
+/* The DEFERRABLE clause that belongs to the FOREIGN KEY recorded at pFk, or 0. */
+static const Token *alterFkDeferLoc(ParseLoc *pList, const ParseLoc *pFk){
+  const char *zFrom = &pFk->t.z[pFk->t.n];
+  const char *zTo = 0;
+  ParseLoc *p;
+  for(p=pList; p; p=p->pNext){
+    if( p->eType!=PARSELOC_ForeignKey || p->t.z<zFrom ) continue;
+    if( zTo==0 || p->t.z<zTo ) zTo = p->t.z;
+  }
+  for(p=pList; p; p=p->pNext){
+    if( p->eType!=PARSELOC_Deferrable || p->t.z<zFrom ) continue;
+    if( zTo==0 || p->t.z<zTo ) return &p->t;
+  }
+  return 0;
+}
+
 /* sqlite_drop_fk(...): remove every FOREIGN KEY matching the given shape. */
 static void dropFkFunc(
   sqlite3_context *ctx,
@@ -3769,6 +3793,8 @@ static void dropFkFunc(
     }
 
     if( bMatch ){
+      const Token *pDefer = alterFkDeferLoc(x.sParse.pLoc, pLoc);
+      if( pDefer ) x.nOut = alterExciseClause(x.zOut, x.nOut, x.zSql, pDefer);
       x.nOut = alterExciseClause(x.zOut, x.nOut, x.zSql, &pLoc->t);
       nFound++;
     }

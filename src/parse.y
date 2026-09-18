@@ -444,7 +444,7 @@ ccons ::= REFERENCES(F) nm(T) eidlist_opt(TA) refargs(R).
                              {sqlite3CreateForeignKey(pParse,0,&T,TA,R,&F);}
 ccons ::= defer_subclause(D).    {
   sqlite3DeferForeignKey(pParse,D);
-  if( IN_RENAME_OBJECT ) sqlite3FkLocExtend(pParse, pParse->sLastToken.z);
+  if( IN_RENAME_OBJECT ) sqlite3FkDeferLocAdd(pParse, pParse->sLastToken.z);
 }
 ccons ::= COLLATE ids(C).        {sqlite3AddCollateType(pParse, &C);}
 ccons ::= GENERATED ALWAYS AS generated.
