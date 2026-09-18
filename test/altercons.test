@@ -149,7 +149,7 @@ foreach {tn col before after} {
   do_execsql_test 3.$tn.0 $before
 
   do_execsql_test 3.$tn.1 "
-    ALTER TABLE t1 ALTER COLUMN $col DROP NOT NULL
+    ALTER TABLE t1 COLUMN $col DROP NOT NULL
   "
 
   do_execsql_test 3.$tn.2 {
@@ -164,9 +164,9 @@ do_execsql_test 4.0 {
   CREATE TABLE t2(x, y CONSTRAINT ccc UNIQUE);
 }
 do_execsql_test 4.1 {
-  ALTER TABLE t2 ALTER COLUMN x DROP NOT NULL;
-  ALTER TABLE t2 ALTER COLUMN x DROP NOT NULL;
-  ALTER TABLE t2 ALTER COLUMN x DROP NOT NULL;
+  ALTER TABLE t2 COLUMN x DROP NOT NULL;
+  ALTER TABLE t2 COLUMN x DROP NOT NULL;
+  ALTER TABLE t2 COLUMN x DROP NOT NULL;
 } {}
 
 #-------------------------------------------------------------------------
@@ -179,7 +179,7 @@ do_execsql_test 5.1 {
 }
 
 do_catchsql_test 5.2.1 {
-  ALTER TABLE t3 ALTER COLUMN b ADD NOT NULL
+  ALTER TABLE t3 COLUMN b ADD NOT NULL
 } {1 {constraint failed}}
 
 do_test 5.2.2 {
@@ -188,23 +188,23 @@ do_test 5.2.2 {
 
 foreach {tn before alter after} {
   1  { CREATE TABLE t1(a, b) }
-     { ALTER TABLE t1 ALTER COLUMN a ADD NOT NULL }
+     { ALTER TABLE t1 COLUMN a ADD NOT NULL }
      { CREATE TABLE t1(a NOT NULL, b) }
 
   2  { CREATE TABLE t1(a, b) }
-     { ALTER TABLE t1 ALTER COLUMN a ADD NOT NULL ON CONFLICT FAIL }
+     { ALTER TABLE t1 COLUMN a ADD NOT NULL ON CONFLICT FAIL }
      { CREATE TABLE t1(a NOT NULL ON CONFLICT FAIL, b) }
 
   3  { CREATE TABLE t1(a, b) }
-     { ALTER TABLE t1 ALTER COLUMN a ADD NOT NULL ON CONFLICT fail; }
+     { ALTER TABLE t1 COLUMN a ADD NOT NULL ON CONFLICT fail; }
      { CREATE TABLE t1(a NOT NULL ON CONFLICT fail, b) }
 
   4  { CREATE TABLE t1(a, b) }
-     { ALTER TABLE t1 ALTER COLUMN b ADD NOT   NULL ON CONFLICT IGNORE ; }
+     { ALTER TABLE t1 COLUMN b ADD NOT   NULL ON CONFLICT IGNORE ; }
      { CREATE TABLE t1(a, b NOT   NULL ON CONFLICT IGNORE) }
 
   5  { CREATE TABLE t1(a, 'a b c' VARCHAR(10), UNIQUE(a)) }
-     { ALTER TABLE t1 ALTER COLUMN 'a b c' ADD NOT NULL }
+     { ALTER TABLE t1 COLUMN 'a b c' ADD NOT NULL }
      { CREATE TABLE t1(a, 'a b c' VARCHAR(10) NOT NULL, UNIQUE(a)) }
 } {
   reset_db
@@ -219,13 +219,13 @@ do_execsql_test 5.4.1 {
   CREATE TABLE x1(a, b, c);
 }
 do_catchsql_test 5.4.2 {
-  ALTER TABLE x1 ALTER COLUMN d ADD NOT NULL;
+  ALTER TABLE x1 COLUMN d ADD NOT NULL;
 } {1 {no such column: d}}
 do_catchsql_test 5.4.3 {
-  ALTER TABLE x2 ALTER COLUMN c ADD NOT NULL;
+  ALTER TABLE x2 COLUMN c ADD NOT NULL;
 } {1 {no such table: x2}}
 do_catchsql_test 5.4.4 {
-  ALTER TABLE temp.x1 ALTER COLUMN c ADD NOT NULL;
+  ALTER TABLE temp.x1 COLUMN c ADD NOT NULL;
 } {1 {no such table: temp.x1}}
 
 #-------------------------------------------------------------------------
@@ -298,12 +298,12 @@ do_execsql_test 7.0 {
 }
 
 do_catchsql_test 7.1 {
-  ALTER TABLE x1 ALTER COLUMN b ADD NOT NULL;
+  ALTER TABLE x1 COLUMN b ADD NOT NULL;
 } {1 {constraint failed}}
 
 do_catchsql_test 7.2 {
   DELETE FROM x1 WHERE b IS NULL;
-  ALTER TABLE x1 ALTER COLUMN b ADD NOT NULL;
+  ALTER TABLE x1 COLUMN b ADD NOT NULL;
 } {0 {}}
 
 do_execsql_test 7.3 {
@@ -311,7 +311,7 @@ do_execsql_test 7.3 {
 } {2 3 4}
 
 do_catchsql_test 7.4 {
-  ALTER TABLE x1 ALTER COLUMN rowid ADD NOT NULL;
+  ALTER TABLE x1 COLUMN rowid ADD NOT NULL;
 } {1 {no such column: rowid}}
 
 do_execsql_test 7.5 {
@@ -321,13 +321,13 @@ do_catchsql_test 7.6 {
   ALTER TABLE v1 RENAME a TO c;
 } {1 {cannot rename columns of view "v1"}}
 do_catchsql_test 7.7 {
-  ALTER TABLE v1 ALTER COLUMN a ADD NOT NULL;
+  ALTER TABLE v1 COLUMN a ADD NOT NULL;
 } {1 {cannot edit constraints of view "v1"}}
 do_catchsql_test 7.8 {
-  ALTER TABLE sqlite_schema ALTER COLUMN sql ADD NOT NULL;
+  ALTER TABLE sqlite_schema COLUMN sql ADD NOT NULL;
 } {1 {table sqlite_master may not be altered}}
 do_catchsql_test 7.9 {
-  ALTER TABLE v1 ALTER COLUMN a DROP NOT NULL
+  ALTER TABLE v1 COLUMN a DROP NOT NULL
 } {1 {cannot edit constraints of view "v1"}}
 
 #-------------------------------------------------------------------------
@@ -340,10 +340,10 @@ do_execsql_test 8.0 {
 }
 
 do_execsql_test 8.1.1 {
-  ALTER TABLE t1 ALTER COLUMN a ADD NOT NULL;
-  ALTER TABLE t1 ALTER COLUMN b ADD NOT NULL;
-  ALTER TABLE t1 ALTER COLUMN c ADD NOT NULL;
-  ALTER TABLE t1 ALTER COLUMN d ADD NOT NULL;
+  ALTER TABLE t1 COLUMN a ADD NOT NULL;
+  ALTER TABLE t1 COLUMN b ADD NOT NULL;
+  ALTER TABLE t1 COLUMN c ADD NOT NULL;
+  ALTER TABLE t1 COLUMN d ADD NOT NULL;
 }
 
 do_execsql_test 8.1.2 {
@@ -355,10 +355,10 @@ do_execsql_test 8.1.3 {
 } {2 2 2 2}
 
 do_execsql_test 8.2.1 {
-  ALTER TABLE t1 ALTER COLUMN a DROP NOT NULL;
-  ALTER TABLE t1 ALTER COLUMN b DROP NOT NULL;
-  ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL;
-  ALTER TABLE t1 ALTER COLUMN d DROP NOT NULL;
+  ALTER TABLE t1 COLUMN a DROP NOT NULL;
+  ALTER TABLE t1 COLUMN b DROP NOT NULL;
+  ALTER TABLE t1 COLUMN c DROP NOT NULL;
+  ALTER TABLE t1 COLUMN d DROP NOT NULL;
 }
 
 do_execsql_test 8.2.2 {
@@ -384,23 +384,23 @@ do_execsql_test 9.0 {
 }
 
 do_catchsql_test 9.1.1 {
-  ALTER TABLE aux.t1 ALTER COLUMN z ADD NOT NULL
+  ALTER TABLE aux.t1 COLUMN z ADD NOT NULL
 } {1 {constraint failed}}
 do_execsql_test 9.1.2 {
   UPDATE aux.t1 SET z=x;
-  ALTER TABLE aux.t1 ALTER COLUMN z ADD NOT NULL;
+  ALTER TABLE aux.t1 COLUMN z ADD NOT NULL;
   SELECT sql FROM aux.sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(x, y, z NOT NULL)}}
 do_execsql_test 9.1.3 {
-  ALTER TABLE aux.t1 ALTER COLUMN z DROP NOT NULL;
+  ALTER TABLE aux.t1 COLUMN z DROP NOT NULL;
   SELECT sql FROM aux.sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(x, y, z)}}
 do_execsql_test 9.1.4 {
-  ALTER TABLE t2 ALTER COLUMN x ADD NOT NULL;
+  ALTER TABLE t2 COLUMN x ADD NOT NULL;
   SELECT sql FROM aux.sqlite_schema WHERE name='t2';
 } {{CREATE TABLE t2(x NOT NULL, y, z)}}
 do_execsql_test 9.1.5 {
-  ALTER TABLE t2 ALTER COLUMN x DROP NOT NULL;
+  ALTER TABLE t2 COLUMN x DROP NOT NULL;
   SELECT sql FROM aux.sqlite_schema WHERE name='t2';
 } {{CREATE TABLE t2(x, y, z)}}
 

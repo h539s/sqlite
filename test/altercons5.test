@@ -396,22 +396,22 @@ do_execsql_test 8.2 { PRAGMA integrity_check } {ok}
 #
 foreach {tn newsql alter res final} {
   1 {CREATE TABLE t1(a, b)}
-    {ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL}
+    {ALTER TABLE t1 COLUMN c DROP NOT NULL}
     {1 {no such column: c}}
     {CREATE TABLE t1(a, b)}
 
   2 {CREATE TABLE t1(x, y, z)}
-    {ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL}
+    {ALTER TABLE t1 COLUMN c DROP NOT NULL}
     {1 {no such column: c}}
     {CREATE TABLE t1(x, y, z)}
 
   3 {CREATE TABLE t1(a, b)}
-    {ALTER TABLE t1 ALTER COLUMN c ADD NOT NULL}
+    {ALTER TABLE t1 COLUMN c ADD NOT NULL}
     {1 {no such column: c}}
     {CREATE TABLE t1(a, b)}
 
   4 {CREATE TABLE t1(b, a, c)}
-    {ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL}
+    {ALTER TABLE t1 COLUMN c DROP NOT NULL}
     {0 {}}
     {CREATE TABLE t1(b, a, c)}
 
@@ -469,7 +469,7 @@ do_execsql_test 9.20.0 {
   PRAGMA writable_schema = 0;
 }
 do_catchsql_test 9.20.1 {
-  ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL;
+  ALTER TABLE t1 COLUMN c DROP NOT NULL;
 } {1 {malformed database schema (t1) - incomplete input}}
 do_execsql_test 9.20.2 {
   PRAGMA writable_schema = 1;
@@ -488,7 +488,7 @@ do_execsql_test 9.21.0 {
   PRAGMA writable_schema = 0;
 }
 do_catchsql_test 9.21.1 {
-  ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL;
+  ALTER TABLE t1 COLUMN c DROP NOT NULL;
 } {1 {malformed database schema (t1)}}
 do_execsql_test 9.21.2 {
   PRAGMA writable_schema = 1;
@@ -511,8 +511,8 @@ foreach {tn alter} {
   3 {ALTER TABLE t1 ADD UNIQUE(a)}
   4 {ALTER TABLE t1 ADD PRIMARY KEY(a)}
   5 {ALTER TABLE t1 COLUMN a ADD DEFAULT 1}
-  6 {ALTER TABLE t1 ALTER COLUMN a ADD NOT NULL}
-  7 {ALTER TABLE t1 ALTER COLUMN c DROP NOT NULL}
+  6 {ALTER TABLE t1 COLUMN a ADD NOT NULL}
+  7 {ALTER TABLE t1 COLUMN c DROP NOT NULL}
   8 {ALTER TABLE t1 COLUMN a DROP DEFAULT}
   9 {ALTER TABLE t1 DROP CHECK}
 } {

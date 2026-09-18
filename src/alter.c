@@ -3098,7 +3098,7 @@ static void alterUpdateSchemaSql(
   sqlite3DbFree(db, zEdit);
 }
 
-/* ALTER TABLE pSrc ALTER COLUMN pCol DROP <kind>, where eType is the kind. */
+/* ALTER TABLE pSrc COLUMN pCol DROP <kind>, where eType is the kind. */
 void sqlite3AlterDropConstraint(
   Parse *pParse,
   SrcList *pSrc,
@@ -3182,7 +3182,7 @@ static int alterRtrimConstraint(
   return iEnd;
 }
 
-/* ALTER TABLE pSrc ALTER COLUMN pCol ADD NOT NULL. */
+/* ALTER TABLE pSrc COLUMN pCol ADD NOT NULL. */
 void sqlite3AlterAddNotNull(
   Parse *pParse,
   SrcList *pSrc,

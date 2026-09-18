@@ -9,7 +9,7 @@
 #
 #*************************************************************************
 #
-# Tests for ALTER TABLE ... ALTER COLUMN {SET|DROP} NOT NULL.
+# Tests for ALTER TABLE ... COLUMN {SET|DROP} NOT NULL.
 #
 # These exercise the path that locates the NOT NULL constraint from the
 # extents recorded by the parser (sqlite3NotNullLocAdd()) rather than by
@@ -159,7 +159,7 @@ foreach {tn before col act after notnull} {
 
   do_execsql_test 1.$tn.0 $before
 
-  do_execsql_test 1.$tn.1 "ALTER TABLE t1 ALTER COLUMN $col $act" {}
+  do_execsql_test 1.$tn.1 "ALTER TABLE t1 COLUMN $col $act" {}
 
   do_execsql_test 1.$tn.2 {
     SELECT sql FROM sqlite_schema WHERE name='t1'
@@ -177,7 +177,7 @@ foreach {tn before col act after notnull} {
 reset_db
 do_execsql_test 2.0 {
   CREATE TABLE t1(a NOT NULL NOT NULL NOT NULL, b);
-  ALTER TABLE t1 ALTER COLUMN a DROP NOT NULL;
+  ALTER TABLE t1 COLUMN a DROP NOT NULL;
   INSERT INTO t1 VALUES(NULL, 1);
   SELECT count(*) FROM t1 WHERE a IS NULL;
 } {1}
@@ -192,7 +192,7 @@ do_execsql_test 2.1 {
 reset_db
 do_execsql_test 3.0 {
   CREATE TABLE t1(a NOT NULL NOT NULL, b);
-  ALTER TABLE t1 ALTER COLUMN a ADD NOT NULL;
+  ALTER TABLE t1 COLUMN a ADD NOT NULL;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a NOT NULL, b)}}
 
@@ -206,7 +206,7 @@ do_catchsql_test 3.1 {
 reset_db
 do_execsql_test 4.0 {
   CREATE TEMP TABLE t1(a NOT NULL NOT NULL, b);
-  ALTER TABLE t1 ALTER COLUMN a DROP NOT NULL;
+  ALTER TABLE t1 COLUMN a DROP NOT NULL;
   SELECT sql FROM sqlite_temp_schema WHERE name='t1';
 } {{CREATE TABLE t1(a, b)}}
 
@@ -217,12 +217,12 @@ do_execsql_test 4.0 {
 reset_db
 do_execsql_test 5.0 {
   CREATE TABLE t1(a CONSTRAINT nn NOT NULL, b);
-  ALTER TABLE t1 ALTER COLUMN a DROP NOT NULL;
+  ALTER TABLE t1 COLUMN a DROP NOT NULL;
   SELECT sql FROM sqlite_schema WHERE name='t1';
 } {{CREATE TABLE t1(a, b)}}
 
 do_catchsql_test 5.1 {
-  ALTER TABLE t1 ALTER COLUMN nosuch DROP NOT NULL;
+  ALTER TABLE t1 COLUMN nosuch DROP NOT NULL;
 } {1 {no such column: nosuch}}
 
 finish_test

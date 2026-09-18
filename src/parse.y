@@ -1964,10 +1964,10 @@ cmd ::= ALTER TABLE fullname(X) DROP CHECK. {
 cmd ::= ALTER TABLE fullname(X) DROP CHECK nm(Y). {
   sqlite3AlterDropCheck(pParse, X, &Y);
 }
-cmd ::= ALTER TABLE fullname(X) ALTER COLUMNKW nm(Y) DROP NOT NULL. {
+cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) DROP NOT NULL. {
   sqlite3AlterDropConstraint(pParse, X, &Y, PARSELOC_NotNull);
 }
-cmd ::= ALTER TABLE fullname(X) ALTER COLUMNKW nm(Y) ADD NOT(Z) NULL onconf. {
+cmd ::= ALTER TABLE fullname(X) COLUMNKW nm(Y) ADD NOT(Z) NULL onconf. {
   sqlite3AlterAddNotNull(pParse, X, &Y, &Z);
 }
 cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) LP(A) expr(E) RP(B) onconf. {
